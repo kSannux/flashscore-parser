@@ -1,0 +1,2 @@
+"""Flashscore parser package."""
+
