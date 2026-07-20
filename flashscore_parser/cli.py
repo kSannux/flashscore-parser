@@ -8,6 +8,7 @@ import time
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
@@ -617,7 +618,12 @@ def main(argv: list[str] | None = None) -> int:
     country = normalize_args(args.country)
     league = normalize_args(args.league)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output = f"{sport}-{country}-{league}-{timestamp}.xlsx" if args.output == "default" else args.output
+    template_suffix = Path(args.template).suffix.lower()
+    output = (
+        f"{sport}-{country}-{league}-{timestamp}{template_suffix}"
+        if args.output == "default"
+        else args.output
+    )
 
     client = FlashscoreClient(base_url=args.base_url, timeout=args.timeout)
 

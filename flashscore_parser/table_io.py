@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from copy import copy
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import copy2
 from typing import Any
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import Cell
 from openpyxl.cell.rich_text import CellRichText, InlineFont, TextBlock
 from openpyxl.worksheet.worksheet import Worksheet
+
+try:
+    import xlwings as xw
+except ImportError:
+    xw = None
 
 PLACEHOLDER_RE = re.compile(r"\{((?:[^{}]|\{[^{}]*\})+)\}")
 CELL_REF = r"\$?[A-Z]{1,3}\$?\d+"
@@ -39,11 +47,18 @@ class Attributes:
     rules: str
 
 
-def ensure_xlsx_path(path: str | Path) -> Path:
-    xlsx_path = Path(path)
-    if xlsx_path.suffix.lower() != ".xlsx":
-        raise RuntimeError(f"Поддерживаются только .xlsx файлы: {xlsx_path}")
-    return xlsx_path
+WORKBOOK_SUFFIXES = {".xlsx", ".xlsm"}
+
+
+def ensure_workbook_path(path: str | Path) -> Path:
+    workbook_path = Path(path)
+    if workbook_path.suffix.lower() not in WORKBOOK_SUFFIXES:
+        raise RuntimeError(f"Поддерживаются только .xlsx и .xlsm файлы: {workbook_path}")
+    return workbook_path
+
+
+def keep_vba(path: Path) -> bool:
+    return path.suffix.lower() == ".xlsm"
 
 def cell_text(value: Any) -> str:
     return "" if value is None else str(value)
@@ -268,17 +283,6 @@ def resolve_placeholder(values: dict[str, Any], placeholder: str) -> Any:
 
     return ""
 
-
-# def render_cell(template: Any, values: dict[str, Any]) -> str:
-#     text = cell_text(template)
-
-#     def replace(match: re.Match[str]) -> str:
-#         value = resolve_placeholder(values, match.group(1))
-#         return "" if value is None else str(value)
-
-#     return PLACEHOLDER_RE.sub(replace, text)
-
-
 def rich_parts(cell: Cell) -> list[tuple[str, InlineFont | None]]:
     if not isinstance(cell.value, CellRichText):
         return [(cell_text(cell.value), None)]
@@ -365,20 +369,6 @@ def render_rich_cell(
     rendered_value = str(result)
     return ("" if rendered_value.isspace() else rendered_value), conditional_fill
 
-# def render_rows(row_templates: list[list[Any]], data_rows: list[dict[str, Any]]) -> list[list[str]]:
-#     rendered: list[list[str]] = []
-#     repeats = [{} for _ in range(max(row_templates, key=lambda x: len(x)))]
-
-#     for values in data_rows:
-#         for row_template in row_templates:
-#             row = []
-#             for col, cell in enumerate(row_template):
-#                 values["repeat"] = repeats[col]
-#                 row.append(render_cell(cell, values))
-#             rendered.append(row)
-#     return rendered
-
-
 def render_rich_rows(
     source_rows: list[tuple[Cell, ...]],
     data_rows: list[dict[str, Any]],
@@ -419,13 +409,150 @@ def clear_template_area(worksheet: Worksheet, start_row: int) -> None:
         worksheet.delete_rows(start_row, worksheet.max_row - start_row + 1)
 
 
+def excel_rgb(color: Any) -> int | None:
+    if color is None or color.type != "rgb" or not color.rgb:
+        return None
+
+    rgb = color.rgb[-6:]
+    try:
+        return int(rgb[4:6] + rgb[2:4] + rgb[:2], 16)
+    except ValueError:
+        return None
+
+
+def apply_excel_inline_font(excel_font: Any, font: InlineFont) -> None:
+    properties = {
+        "Name": font.rFont,
+        "Size": font.sz,
+        "Bold": font.b,
+        "Italic": font.i,
+        "Strikethrough": font.strike,
+        "Superscript": font.vertAlign == "superscript",
+        "Subscript": font.vertAlign == "subscript",
+    }
+    for name, value in properties.items():
+        if value is not None:
+            setattr(excel_font, name, value)
+
+    underline = {"single": 2, "double": -4119, "singleAccounting": 4, "doubleAccounting": 5}
+    if font.u is not None:
+        excel_font.Underline = underline.get(font.u, -4142)
+
+    color = excel_rgb(font.color)
+    if color is not None:
+        excel_font.Color = color
+
+
+def write_excel_rich_text(cell: Any, value: CellRichText) -> None:
+    text = str(value)
+    cell.api.Value = f"'{text}" if text.startswith("=") else text
+
+    position = 1
+    for part in value:
+        part_text = str(part)
+        if isinstance(part, TextBlock) and part_text:
+            excel_font = cell.api.Characters(Start=position, Length=len(part_text)).Font
+            apply_excel_inline_font(excel_font, part.font)
+        position += len(part_text)
+
+
+def apply_excel_fill(cell: Any, fill: Any) -> None:
+    if fill.fill_type != "solid":
+        return
+
+    color = excel_rgb(fill.fgColor)
+    if color is None:
+        return
+
+    cell.api.Interior.Pattern = 1
+    cell.api.Interior.Color = color
+
+
+def fill_xlsm_template_with_excel(
+    output_path: Path,
+    sheet_name: str,
+    start_row: int,
+    source_row_numbers: list[int],
+    rendered_rows: list[list[tuple[str | CellRichText, Any | None]]],
+) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "Заполнение .xlsm с надстройками выполняется только в Windows через установленный Microsoft Excel."
+        )
+
+    if xw is None:
+        raise RuntimeError(
+            "Для .xlsm установите xlwings: py -m pip install -r requirements.txt"
+        )
+
+    try:
+        app = xw.App(visible=False, add_book=False)
+    except Exception as error:
+        raise RuntimeError(f"Не удалось запустить Microsoft Excel: {error}") from error
+    app.display_alerts = False
+    app.screen_updating = False
+    workbook = None
+    source_sheet = None
+
+    try:
+        workbook = app.books.open(str(output_path), update_links=False, read_only=False)
+        worksheet = workbook.sheets[sheet_name]
+
+        # Keep an untouched copy of the template rows while replacing the originals.
+        worksheet.api.Copy(After=worksheet.api)
+        source_sheet = workbook.sheets.active
+        source_name = "__flashscore_template_source__"
+        sheet_names = {sheet.name for sheet in workbook.sheets}
+        suffix = 1
+        while source_name in sheet_names:
+            suffix += 1
+            source_name = f"__flashscore_template_source_{suffix}__"
+        source_sheet.name = source_name
+
+        last_row = worksheet.used_range.last_cell.row
+        if last_row >= start_row:
+            worksheet.api.Rows(f"{start_row}:{last_row}").Delete()
+
+        for row_offset, rendered_row in enumerate(rendered_rows):
+            target_row = start_row + row_offset
+            source_row = source_row_numbers[row_offset % len(source_row_numbers)]
+            for column, (value, conditional_fill) in enumerate(rendered_row, start=1):
+                source_cell = source_sheet.cells(source_row, column)
+                target_cell = worksheet.cells(target_row, column)
+                source_cell.api.Copy(Destination=target_cell.api)
+
+                if isinstance(value, CellRichText):
+                    write_excel_rich_text(target_cell, value)
+                else:
+                    rendered_value = "" if value is None else str(value)
+                    target_cell.api.Value = (
+                        f"'{rendered_value}" if rendered_value.startswith("=") else rendered_value
+                    )
+
+                if conditional_fill is not None:
+                    apply_excel_fill(target_cell, conditional_fill)
+
+        source_sheet.delete()
+        source_sheet = None
+        workbook.save()
+    except Exception as error:
+        raise RuntimeError(f"Не удалось заполнить .xlsm через Microsoft Excel: {error}") from error
+    finally:
+        if source_sheet is not None:
+            with suppress(Exception):
+                source_sheet.delete()
+        if workbook is not None:
+            workbook.close()
+        app.quit()
+
+
 def read_xlsx_template(
     path: str | Path,
     sheet_name: str | None = None,
     header_row: int = 1,
 ) -> XlsxTemplate:
-    template_path = ensure_xlsx_path(path)
-    workbook = load_workbook(template_path, rich_text=True)
+    template_path = ensure_workbook_path(path)
+    workbook = load_workbook(template_path, rich_text=True, keep_vba=keep_vba(template_path))
     worksheet = workbook[sheet_name] if sheet_name else workbook.active
 
     if header_row < 1:
@@ -461,9 +588,15 @@ def fill_xlsx_template(
     template_path: str | Path,
     output_path: str | Path
 ) -> None:
-    output_path = ensure_xlsx_path(output_path)
+    template_path = ensure_workbook_path(template_path)
+    output_path = ensure_workbook_path(output_path)
+    if template_path.suffix.lower() != output_path.suffix.lower():
+        raise RuntimeError("Расширение выходного файла должно совпадать с расширением шаблона.")
+    if template_path.resolve() == output_path.resolve():
+        raise RuntimeError("Выходной файл не должен совпадать с файлом шаблона.")
 
-    workbook = load_workbook(template_path, rich_text=True)
+    copy2(template_path, output_path)
+    workbook = load_workbook(output_path, rich_text=True, keep_vba=keep_vba(output_path))
     worksheet = workbook[template.sheet_name]
     start_row = template.header_row + 1
     source_rows = template_rows(worksheet, start_row)
@@ -474,6 +607,18 @@ def fill_xlsx_template(
     rendered_rows = render_rich_rows(source_rows, data_rows, worksheet)
     style_rows = [[cell for cell in row] for row in source_rows]
 
+    if keep_vba(output_path):
+        source_row_numbers = [row[0].row for row in source_rows]
+        workbook.close()
+        fill_xlsm_template_with_excel(
+            output_path,
+            template.sheet_name,
+            start_row,
+            source_row_numbers,
+            rendered_rows,
+        )
+        return
+
     clear_template_area(worksheet, start_row)
 
     for row_offset, rendered_row in enumerate(rendered_rows):
@@ -482,7 +627,10 @@ def fill_xlsx_template(
         for column_index, (value, conditional_fill) in enumerate(rendered_row, start=1):
             target_cell = worksheet.cell(row=target_row_index, column=column_index, value=value)
             if column_index <= len(style_row):
-                copy_cell_style(style_row[column_index - 1], target_cell)
+                source_cell = style_row[column_index - 1]
+                copy_cell_style(source_cell, target_cell)
+                if source_cell.data_type == "s" and isinstance(value, str) and value.startswith("="):
+                    target_cell.data_type = "s"
             if conditional_fill is not None:
                 target_cell.fill = conditional_fill
 
