@@ -422,27 +422,28 @@ def excel_rgb(color: Any) -> int | None:
 
 def apply_excel_inline_font(excel_font: Any, font: InlineFont) -> None:
     properties = {
-        "name": font.rFont,
-        "size": font.sz,
-        "bold": font.b,
-        "italic": font.i,
+        "Name": font.rFont,
+        "Size": font.sz,
+        "Bold": font.b,
+        "Italic": font.i,
     }
     for name, value in properties.items():
         if value is not None:
             setattr(excel_font, name, value)
 
     if font.strike is not None:
-        excel_font.api.Strikethrough = font.strike
+        excel_font.Strikethrough = font.strike
     if font.vertAlign is not None:
-        excel_font.api.Superscript = font.vertAlign == "superscript"
-        excel_font.api.Subscript = font.vertAlign == "subscript"
+        excel_font.Superscript = font.vertAlign == "superscript"
+        excel_font.Subscript = font.vertAlign == "subscript"
 
     underline = {"single": 2, "double": -4119, "singleAccounting": 4, "doubleAccounting": 5}
     if font.u is not None:
-        excel_font.api.Underline = underline.get(font.u, -4142)
+        excel_font.Underline = underline.get(font.u, -4142)
 
-    if font.color is not None and font.color.type == "rgb" and font.color.rgb:
-        excel_font.color = f"#{font.color.rgb[-6:]}"
+    color = excel_rgb(font.color)
+    if color is not None:
+        excel_font.Color = color
 
 
 def write_excel_rich_text(cell: Any, value: CellRichText) -> None:
@@ -453,7 +454,7 @@ def write_excel_rich_text(cell: Any, value: CellRichText) -> None:
     for part in value:
         part_text = str(part)
         if isinstance(part, TextBlock) and part_text:
-            excel_font = cell.characters[position - 1 : position - 1 + len(part_text)].font
+            excel_font = cell.api.GetCharacters(position, len(part_text)).Font
             apply_excel_inline_font(excel_font, part.font)
         position += len(part_text)
 
