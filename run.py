@@ -53,8 +53,6 @@ def ensure_dependencies(python: Path) -> None:
 
 def main() -> int:
     if getattr(sys, "frozen", False):
-        # PyInstaller already contains the interpreter and project packages.
-        # Starting a virtual environment here would recursively start this exe.
         from flashscore_parser.cli import main as cli_main
 
         return cli_main()
