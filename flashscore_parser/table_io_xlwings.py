@@ -112,13 +112,17 @@ def fill_template_with_excel(
         if last_row >= start_row:
             worksheet.api.Rows(f"{start_row}:{last_row}").Delete()
 
+        total_rows = len(rendered_rows)
+        print(f"Excel: заполнение {total_rows} строк...", flush=True)
         for row_offset, rendered_row in enumerate(rendered_rows):
             target_row = start_row + row_offset
             source_row = source_row_numbers[row_offset % len(source_row_numbers)]
+            source_range = source_sheet.range((source_row, 1), (source_row, len(rendered_row)))
+            target_range = worksheet.range((target_row, 1), (target_row, len(rendered_row)))
+            source_range.api.Copy(Destination=target_range.api)
+
             for column, (value, conditional_fill) in enumerate(rendered_row, start=1):
-                source_cell = source_sheet.cells(source_row, column)
                 target_cell = worksheet.cells(target_row, column)
-                source_cell.api.Copy(Destination=target_cell.api)
 
                 if hasattr(value, "_opt"):
                     write_excel_rich_text(target_cell, value)
@@ -131,9 +135,14 @@ def fill_template_with_excel(
                 if conditional_fill is not None:
                     apply_excel_fill(target_cell, conditional_fill)
 
+            if (row_offset + 1) % 100 == 0 or row_offset + 1 == total_rows:
+                print(f"Excel: заполнено {row_offset + 1}/{total_rows} строк.", flush=True)
+
         source_sheet.delete()
         source_sheet = None
+        print("Excel: сохранение файла...", flush=True)
         workbook.save()
+        print("Excel: файл сохранён.", flush=True)
     except Exception as error:
         raise RuntimeError(f"Не удалось заполнить .xlsm через Microsoft Excel: {error}") from error
     finally:

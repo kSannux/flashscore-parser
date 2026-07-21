@@ -679,7 +679,9 @@ def main(argv: list[str] | None = None) -> int:
                     f"{info.team1} {info.score1}:{info.score2} {info.team2}"
                 )
 
+        print("Данные собраны. Заполнение файла...", flush=True)
         fill_xlsx_template([info.as_placeholder_row() for info in matches_info], template, args.template, output)
+        print(f"Готово: {len(matches_info)} записей сохранено в {output}", flush=True)
     except RuntimeError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
