@@ -13,7 +13,6 @@ except ImportError:
 
 def write_excel_text(cell: Any, text: str) -> None:
     if text.startswith("="):
-        cell.api.NumberFormat = "General"
         cell.api.Formula = text
         return
     cell.api.NumberFormat = "@"
