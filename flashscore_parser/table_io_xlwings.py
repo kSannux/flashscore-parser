@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 from contextlib import suppress
 from pathlib import Path
@@ -9,6 +10,11 @@ try:
     import xlwings as xw
 except ImportError:
     xw = None
+
+def write_excel_text(cell: Any, text: str) -> None:
+    if not text.startswith("="):
+        cell.api.NumberFormat = "@"
+    cell.api.Value = text
 
 
 def excel_rgb(color: Any) -> int | None:
@@ -49,7 +55,7 @@ def apply_excel_inline_font(excel_font: Any, font: Any) -> None:
 
 def write_excel_rich_text(cell: Any, value: Any) -> None:
     text = str(value)
-    cell.api.Value = f"'{text}" if text.startswith("=") else text
+    write_excel_text(cell, text)
 
     position = 1
     for part in value:
@@ -128,9 +134,7 @@ def fill_template_with_excel(
                     write_excel_rich_text(target_cell, value)
                 else:
                     rendered_value = "" if value is None else str(value)
-                    target_cell.api.Value = (
-                        f"'{rendered_value}" if rendered_value.startswith("=") else rendered_value
-                    )
+                    write_excel_text(target_cell, rendered_value)
 
                 if conditional_fill is not None:
                     apply_excel_fill(target_cell, conditional_fill)
