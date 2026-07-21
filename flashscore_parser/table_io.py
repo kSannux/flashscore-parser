@@ -11,7 +11,9 @@ from typing import Any
 from openpyxl import load_workbook
 from openpyxl.cell.cell import Cell
 from openpyxl.cell.rich_text import CellRichText, InlineFont, TextBlock
+from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl.utils.cell import range_boundaries
 
 from flashscore_parser.table_io_xlwings import fill_template_with_excel
 
@@ -42,6 +44,34 @@ class Attributes:
     rules: str
 
 
+@dataclass(frozen=True)
+class RenderedArrayFormula:
+    formula: str
+    array_ref: str
+
+    def shifted_ref(self, row_offset: int) -> str:
+        def replace(match: re.Match[str]) -> str:
+            column = match.group("column")
+            row = match.group("row")
+            if row.startswith("$"):
+                return f"{column}{row}"
+            return f"{column}{int(row) + row_offset}"
+
+        return re.sub(
+            r"(?P<column>\$?[A-Z]{1,3})(?P<row>\$?\d+)",
+            replace,
+            self.array_ref,
+        )
+
+    def cells(self, row_offset: int) -> set[tuple[int, int]]:
+        min_column, min_row, max_column, max_row = range_boundaries(self.shifted_ref(row_offset))
+        return {
+            (row, column)
+            for row in range(min_row, max_row + 1)
+            for column in range(min_column, max_column + 1)
+        }
+
+
 WORKBOOK_SUFFIXES = {".xlsx", ".xlsm"}
 
 
@@ -56,6 +86,8 @@ def keep_vba(path: Path) -> bool:
     return path.suffix.lower() == ".xlsm"
 
 def cell_text(value: Any) -> str:
+    if isinstance(value, ArrayFormula):
+        return value.text
     return "" if value is None else str(value)
 
 def cell_has_placeholder(value: str) -> bool:
@@ -333,7 +365,20 @@ def render_rich_cell(
     cell: Cell,
     values: dict[str, Any],
     worksheet: Worksheet,
-) -> tuple[str | CellRichText, Any | None]:
+) -> tuple[str | CellRichText | RenderedArrayFormula, Any | None]:
+    if isinstance(cell.value, ArrayFormula):
+        def replace(match: re.Match[str]) -> str:
+            value = resolve_placeholder(values, match.group(1))
+            return "" if value is None else str(value)
+
+        return (
+            RenderedArrayFormula(
+                formula=PLACEHOLDER_RE.sub(replace, cell.value.text),
+                array_ref=cell.value.ref,
+            ),
+            None,
+        )
+
     result = CellRichText()
     has_rich_text = isinstance(cell.value, CellRichText)
     has_format_attr = False
@@ -368,13 +413,13 @@ def render_rich_rows(
     source_rows: list[tuple[Cell, ...]],
     data_rows: list[dict[str, Any]],
     worksheet: Worksheet,
-) -> list[list[tuple[str | CellRichText, Any | None]]]:
-    rendered: list[list[tuple[str | CellRichText, Any | None]]] = []
+) -> list[list[tuple[str | CellRichText | RenderedArrayFormula, Any | None]]]:
+    rendered: list[list[tuple[str | CellRichText | RenderedArrayFormula, Any | None]]] = []
     repeats = [{} for _ in range(max(len(row) for row in source_rows))]
 
     for values in data_rows:
         for source_row in source_rows:
-            row: list[tuple[str | CellRichText, Any | None]] = []
+            row: list[tuple[str | CellRichText | RenderedArrayFormula, Any | None]] = []
             for column, cell in enumerate(source_row):
                 values["repeat"] = repeats[column]
                 row.append(render_rich_cell(cell, values, worksheet))
@@ -465,6 +510,21 @@ def fill_xlsx_template(
     rendered_rows = render_rich_rows(source_rows, data_rows, worksheet)
     style_rows = [[cell for cell in row] for row in source_rows]
 
+    array_formulas: dict[tuple[int, int], tuple[RenderedArrayFormula, str]] = {}
+    array_cells: set[tuple[int, int]] = set()
+    for row_offset, rendered_row in enumerate(rendered_rows):
+        target_row_index = start_row + row_offset
+        style_row = style_rows[row_offset % len(style_rows)]
+        for column_index, (value, _) in enumerate(rendered_row, start=1):
+            if not isinstance(value, RenderedArrayFormula):
+                continue
+            row_offset_from_source = target_row_index - style_row[column_index - 1].row
+            array_formulas[(target_row_index, column_index)] = (
+                value,
+                value.shifted_ref(row_offset_from_source),
+            )
+            array_cells.update(value.cells(row_offset_from_source))
+
     if keep_vba(output_path):
         source_row_numbers = [row[0].row for row in source_rows]
         workbook.close()
@@ -483,12 +543,18 @@ def fill_xlsx_template(
         target_row_index = start_row + row_offset
         style_row = style_rows[row_offset % len(style_rows)]
         for column_index, (value, conditional_fill) in enumerate(rendered_row, start=1):
-            target_cell = worksheet.cell(row=target_row_index, column=column_index, value=value)
+            target_cell = worksheet.cell(row=target_row_index, column=column_index)
             if column_index <= len(style_row):
                 source_cell = style_row[column_index - 1]
                 copy_cell_style(source_cell, target_cell)
+            if (target_row_index, column_index) in array_cells:
+                continue
+            target_cell.value = value
             if conditional_fill is not None:
                 target_cell.fill = conditional_fill
+
+    for (row, column), (formula, array_ref) in array_formulas.items():
+        worksheet.cell(row=row, column=column).value = ArrayFormula(ref=array_ref, text=formula.formula)
 
     workbook.save(output_path)
     workbook.close()
