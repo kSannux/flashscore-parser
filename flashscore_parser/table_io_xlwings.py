@@ -89,6 +89,7 @@ def fill_template_with_excel(
     start_row: int,
     source_row_numbers: list[int],
     rendered_rows: list[list[tuple[Any, Any | None]]],
+    target_sheet_name: str | None = None,
 ) -> None:
     if sys.platform != "win32":
         raise RuntimeError("Заполнение .xlsm с надстройками выполняется только в Windows через Microsoft Excel.")
@@ -168,6 +169,8 @@ def fill_template_with_excel(
 
         source_sheet.delete()
         source_sheet = None
+        if target_sheet_name is not None:
+            worksheet.name = target_sheet_name
         print("Excel: сохранение файла...", flush=True)
         workbook.save()
         print("Excel: файл сохранён.", flush=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 import time
 import time
@@ -15,7 +16,7 @@ from urllib.parse import urlencode, urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from flashscore_parser.table_io import read_xlsx_template, fill_xlsx_template
+from flashscore_parser.table_io import fill_xlsx_template, read_xlsx_sheet_templates
 
 DEFAULT_BASE_URL = "https://www.flashscore.it/"
 FEED_BASE_URL_TEMPLATE = "https://{project_id}.flashscore.ninja/{project_id}/x/feed"
@@ -600,92 +601,129 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Консольный парсер чемпионатов Flashscore с выгрузкой в xlsx по шаблону."
     )
-    parser.add_argument("--sport", default="football", help="Вид спорта: football, tennis, basketball и т.д.")
-    parser.add_argument("--country", required=True, help="Страна: Germany, England, Russia и т.д.")
-    parser.add_argument("--league", required=True, help="Фильтр по названию чемпионата, например Bundesliga.")
     parser.add_argument("--template", required=True, help="Путь к шаблону")
     parser.add_argument("--output", default="default", help="Путь к файлу с данными.")
     parser.add_argument("--delay", type=float, default=0, help="Задержка между запросами")
     parser.add_argument("--timeout", type=float, default=50.0, help="Таймаут HTTP-запроса в секундах.")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Базовый URL Flashscore.")
-    parser.add_argument("--numbering", type=str, default="begin", help="Порядок нумерации матчей.")
     return parser
+
+
+def build_sheet_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--sport", default="football")
+    parser.add_argument("--country", required=True)
+    parser.add_argument("--league", required=True)
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--numbering", choices=("begin", "end"), default="begin")
+    parser.add_argument("--sheet", required=True)
+    return parser
+
+
+def parse_sheet_args(text: str, source_sheet_name: str) -> argparse.Namespace:
+    try:
+        return build_sheet_arg_parser().parse_args(shlex.split(text))
+    except SystemExit as error:
+        raise RuntimeError(f"Некорректные аргументы в листе '{source_sheet_name}': {text}") from error
+
+
+def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float) -> list[MatchInfo]:
+    sport = normalize_args(sheet_args.sport)
+    country = normalize_args(sheet_args.country)
+    league = normalize_args(sheet_args.league)
+    client = FlashscoreClient(base_url=sheet_args.base_url, timeout=timeout)
+
+    league_html = client.fetch(f"/{sport}/{country}/{league}")
+    tabs = parse_tabs_html(league_html)
+    results_url = tab_url(tabs, LEAGUE_ALIAS["results"])
+    if not results_url:
+        results_url = f"/{sport}/{country}/{league}/results/"
+    result_html = client.fetch(results_url)
+    project_id = extract_project_id(result_html)
+
+    rounds = parse_rounds(client, result_html, sheet_args.numbering)
+    total_matches = sum(len(round_matches) for round_matches in rounds)
+    if not rounds or total_matches == 0:
+        raise RuntimeError(
+            f"На странице результатов не найдено матчей: {results_url}. "
+            "Проверьте предыдущие сезоны в archive и укажите в --league"
+        )
+
+    matches_info: list[MatchInfo] = []
+    cnt_increase = 1
+    cnt_decrease = total_matches
+    for round_matches in rounds:
+        for match in round_matches:
+            info = MatchInfo(
+                number=cnt_increase if sheet_args.numbering == "begin" else cnt_decrease,
+                round=match.round,
+                time=match.time,
+                team1=match.team1,
+                team2=match.team2,
+                score1=match.score1,
+                score2=match.score2,
+            )
+            cnt_increase += 1
+            cnt_decrease -= 1
+
+            odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
+            handle_odds_json(odds_payload, match, info)
+            if delay > 0:
+                time.sleep(delay)
+
+            h2h_url = build_feed_url(project_id, f"df_hh_1_{match.event_id}")
+            h2h_payload = client.fetch_feed(h2h_url)
+            handle_h2h(h2h_payload, info)
+
+            matches_info.append(info)
+            print(
+                f"Обработан матч {info.number}: "
+                f"тур {info.round}, {info.time}, "
+                f"{info.team1} {info.score1}:{info.score2} {info.team2}"
+            )
+    return matches_info
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    sport = normalize_args(args.sport)
-    country = normalize_args(args.country)
-    league = normalize_args(args.league)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     template_suffix = Path(args.template).suffix.lower()
-    output = (
-        f"{sport}-{country}-{league}-{timestamp}{template_suffix}"
-        if args.output == "default"
-        else args.output
-    )
-
-    client = FlashscoreClient(base_url=args.base_url, timeout=args.timeout)
+    output = f"flashscore-{timestamp}{template_suffix}" if args.output == "default" else args.output
 
     try:
-        template = read_xlsx_template(args.template)
+        sheet_templates = read_xlsx_sheet_templates(args.template)
+        sheet_jobs = [
+            (template, parse_sheet_args(config_text, template.sheet_name))
+            for template, config_text in sheet_templates
+        ]
+        target_names = [sheet_args.sheet for _, sheet_args in sheet_jobs]
+        if len(target_names) != len(set(target_names)):
+            raise RuntimeError("Значения --sheet должны быть уникальными для всех листов.")
+        source_names = {template.sheet_name for template, _ in sheet_jobs}
+        for template, sheet_args in sheet_jobs:
+            if sheet_args.sheet in source_names and sheet_args.sheet != template.sheet_name:
+                raise RuntimeError(
+                    f"Лист '{template.sheet_name}' нельзя переименовать в '{sheet_args.sheet}': "
+                    "это имя другого исходного листа."
+                )
 
-        league_html = client.fetch(f"/{sport}/{country}/{league}")
-
-        tabs = parse_tabs_html(league_html)
-        results_url = tab_url(tabs, LEAGUE_ALIAS["results"])
-        if not results_url:
-            results_url = f"/{sport}/{country}/{league}/results/"
-        result_html = client.fetch(results_url)
-        project_id = extract_project_id(result_html)
-
-        rounds = parse_rounds(client, result_html, args.numbering)
-        if not rounds or sum(len(round) for round in rounds) == 0:
-            raise RuntimeError(
-                f"На странице результатов не найдено матчей: {results_url}. "
-                "Проверьте предыдущие сезоны в archive и укажите в --league"
+        for index, (template, sheet_args) in enumerate(sheet_jobs):
+            print(f"Лист {template.sheet_name}: сбор данных для {sheet_args.sport}/{sheet_args.country}/{sheet_args.league}.")
+            matches_info = collect_matches(sheet_args, args.delay, args.timeout)
+            print(f"Лист {template.sheet_name}: данные собраны. Заполнение файла...", flush=True)
+            fill_xlsx_template(
+                [info.as_placeholder_row() for info in matches_info],
+                template,
+                args.template,
+                output,
+                copy_template=index == 0,
+                target_sheet_name=sheet_args.sheet,
             )
-
-        matches_info: list[MatchInfo] = []
-        cnt_increase = 1
-        cnt_decrease = len(matches_info)
-        for round in rounds:
-            for match in round:
-                info = MatchInfo(
-                    number=cnt_increase if args.numbering == "begin" else cnt_decrease,
-                    round=match.round,
-                    time=match.time,
-                    team1=match.team1,
-                    team2=match.team2,
-                    score1=match.score1,
-                    score2=match.score2,
-                )
-                cnt_increase += 1
-                cnt_decrease -= 1
-
-                odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
-                handle_odds_json(odds_payload, match, info)
-                if args.delay > 0:
-                    time.sleep(args.delay)
-
-                h2h_url = build_feed_url(project_id, f"df_hh_1_{match.event_id}")
-                h2h_payload = client.fetch_feed(h2h_url)
-                handle_h2h(h2h_payload, info)
-
-                matches_info.append(info)
-                print(
-                    f"Обработан матч {info.number}: "
-                    f"тур {info.round}, {info.time}, "
-                    f"{info.team1} {info.score1}:{info.score2} {info.team2}"
-                )
-
-        print("Данные собраны. Заполнение файла...", flush=True)
-        fill_xlsx_template([info.as_placeholder_row() for info in matches_info], template, args.template, output)
-        print(f"Готово: {len(matches_info)} записей сохранено в {output}", flush=True)
+            print(f"Лист {sheet_args.sheet}: сохранено {len(matches_info)} записей.", flush=True)
     except RuntimeError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
 
+    print(f"Готово: все листы сохранены в {output}", flush=True)
     return 0
 
 

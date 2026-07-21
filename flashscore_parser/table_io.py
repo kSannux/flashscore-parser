@@ -485,11 +485,41 @@ def read_xlsx_template(
         template_start_row=header_row + 1,
     )
 
+
+def read_xlsx_sheet_templates(path: str | Path) -> list[tuple[XlsxTemplate, str]]:
+    template_path = ensure_workbook_path(path)
+    workbook = load_workbook(template_path, rich_text=True, keep_vba=keep_vba(template_path))
+    try:
+        sheet_configs: list[tuple[str, str]] = []
+        for worksheet in workbook.worksheets:
+            try:
+                config_value = worksheet[worksheet.title].value
+            except ValueError as error:
+                raise RuntimeError(
+                    f"Имя листа '{worksheet.title}' должно быть ссылкой на ячейку, например Z1."
+                ) from error
+            config_text = cell_text(config_value).strip()
+            if not config_text:
+                raise RuntimeError(
+                    f"В ячейке {worksheet.title}!{worksheet.title} не найдены аргументы листа."
+                )
+            sheet_configs.append((worksheet.title, config_text))
+    finally:
+        workbook.close()
+
+    return [
+        (read_xlsx_template(template_path, sheet_name), config_text)
+        for sheet_name, config_text in sheet_configs
+    ]
+
 def fill_xlsx_template(
     data_rows: list[dict[str, Any]],    
     template: XlsxTemplate,
     template_path: str | Path,
-    output_path: str | Path
+    output_path: str | Path,
+    *,
+    copy_template: bool = True,
+    target_sheet_name: str | None = None,
 ) -> None:
     template_path = ensure_workbook_path(template_path)
     output_path = ensure_workbook_path(output_path)
@@ -498,7 +528,10 @@ def fill_xlsx_template(
     if template_path.resolve() == output_path.resolve():
         raise RuntimeError("Выходной файл не должен совпадать с файлом шаблона.")
 
-    copy2(template_path, output_path)
+    if copy_template:
+        copy2(template_path, output_path)
+    elif not output_path.exists():
+        raise RuntimeError(f"Выходной файл не найден: {output_path}")
     workbook = load_workbook(output_path, rich_text=True, keep_vba=keep_vba(output_path))
     worksheet = workbook[template.sheet_name]
     start_row = template.header_row + 1
@@ -534,6 +567,7 @@ def fill_xlsx_template(
             start_row,
             source_row_numbers,
             rendered_rows,
+            target_sheet_name,
         )
         return
 
@@ -556,5 +590,7 @@ def fill_xlsx_template(
     for (row, column), (formula, array_ref) in array_formulas.items():
         worksheet.cell(row=row, column=column).value = ArrayFormula(ref=array_ref, text=formula.formula)
 
+    if target_sheet_name is not None:
+        worksheet.title = target_sheet_name
     workbook.save(output_path)
     workbook.close()
