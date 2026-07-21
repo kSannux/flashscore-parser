@@ -487,8 +487,6 @@ def fill_xlsx_template(
             if column_index <= len(style_row):
                 source_cell = style_row[column_index - 1]
                 copy_cell_style(source_cell, target_cell)
-                if source_cell.data_type == "s" and isinstance(value, str) and value.startswith("="):
-                    target_cell.data_type = "s"
             if conditional_fill is not None:
                 target_cell.fill = conditional_fill
 

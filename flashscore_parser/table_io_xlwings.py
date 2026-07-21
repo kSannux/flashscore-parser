@@ -12,8 +12,11 @@ except ImportError:
     xw = None
 
 def write_excel_text(cell: Any, text: str) -> None:
-    if not text.startswith("="):
-        cell.api.NumberFormat = "@"
+    if text.startswith("="):
+        cell.api.NumberFormat = "General"
+        cell.api.Formula = text
+        return
+    cell.api.NumberFormat = "@"
     cell.api.Value = text
 
 
@@ -56,6 +59,8 @@ def apply_excel_inline_font(excel_font: Any, font: Any) -> None:
 def write_excel_rich_text(cell: Any, value: Any) -> None:
     text = str(value)
     write_excel_text(cell, text)
+    if text.startswith("="):
+        return
 
     position = 1
     for part in value:
