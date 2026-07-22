@@ -304,8 +304,8 @@ def build_feed_url(project_id: str | int, feed_name: str) -> str:
     return f"{base_url}/{feed_name}"
 
 INITIAL_FEED_RE = re.compile(
-    r"""cjs\.initialFeeds\[['\"](?P<name>[^'\"]+)['\"]\]\s*=\s*\{\s*data:\s*`([^`]*?)`\s*,\s*
-    allEventsCount\s*:\s*\d+\s*,\s*
+    r"""cjs\.initialFeeds\[['\"](?P<name>[^'\"]+)['\"]\]\s*=\s*\{\s*data:\s*`(?P<data>[^`]*?)`\s*,\s*
+    allEventsCount\s*:\s*(?P<all_events_count>\d+)\s*,\s*
     seasonId\s*:\s*(?P<season_id>\d+)\s*,\s*\}""",
     re.S | re.X,
 )
@@ -335,8 +335,14 @@ def parse_league_toggle_key(html: str) -> str:
     return match.group(1)
 
 def parse_initial_feed(html: str, name: str) -> dict[str, str]:
-    feeds = {match.group("name"): {"seasonId": match.group("season_id")} 
-             for match in INITIAL_FEED_RE.finditer(html)}
+    feeds = {
+        match.group("name"): {
+            "data": match.group("data"),
+            "allEventsCount": match.group("all_events_count"),
+            "seasonId": match.group("season_id"),
+        }
+        for match in INITIAL_FEED_RE.finditer(html)
+    }
     
     data = feeds.get(name)
     if data is None:
@@ -376,14 +382,14 @@ def parse_matches_feed(data: str) -> list[list[Match]]:
                 time=parse_timestamp(fields.get("AD")),
                 team1=fields.get("AE", ""),
                 team2=fields.get("AF", ""),
-                score1=int(fields.get("AG", "")),
-                score2=int(fields.get("AH", "")),
+                score1=fields.get("AG", ""),
+                score2=fields.get("AH", ""),
             )
         )
 
     return rounds
 
-def parse_rounds(client: FlashscoreClient, html: str, numbering: str) -> list[list[Match]]:
+def parse_results_rounds(client: FlashscoreClient, html: str, numbering: str) -> list[list[Match]]:
     feed = parse_initial_feed(html, "results")
 
     rounds: list[list[Match]] = []
@@ -632,19 +638,15 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     league = normalize_args(sheet_args.league)
     client = FlashscoreClient(base_url=sheet_args.base_url, timeout=timeout)
 
-    league_html = client.fetch(f"/{sport}/{country}/{league}")
-    tabs = parse_tabs_html(league_html)
-    results_url = tab_url(tabs, LEAGUE_ALIAS["results"])
-    if not results_url:
-        results_url = f"/{sport}/{country}/{league}/results/"
-    result_html = client.fetch(results_url)
-    project_id = extract_project_id(result_html)
+    url = f"/{sport}/{country}/{league}"
+    league_html = client.fetch(url)
+    project_id = extract_project_id(league_html)
 
-    rounds = parse_rounds(client, result_html, sheet_args.numbering)
+    rounds = parse_results_rounds(client, league_html, sheet_args.numbering)
     total_matches = sum(len(round_matches) for round_matches in rounds)
     if not rounds or total_matches == 0:
         raise RuntimeError(
-            f"На странице результатов не найдено матчей: {results_url}. "
+            f"На странице результатов не найдено матчей: {url}/results. "
             "Проверьте предыдущие сезоны в archive и укажите в --league"
         )
 
