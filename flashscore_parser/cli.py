@@ -653,8 +653,8 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 time=match.time,
                 team1=match.team1,
                 team2=match.team2,
-                score1=match.score1,
-                score2=match.score2,
+                score1=int(match.score1),
+                score2=int(match.score2),
             )
             cnt -= 1
 
