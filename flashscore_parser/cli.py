@@ -271,13 +271,7 @@ def parse_timestamp(value: str | None) -> str:
     except ValueError:
         return value
 
-def get_correct_numbering(rounds: list[list[Match]], numbering: str):
-    if numbering == "end":
-        return rounds
-
-    if numbering != "begin":
-        raise RuntimeError("Numbering mode can be only 'begin' and 'end'.")
-
+def get_correct_numbering(rounds: list[list[Match]]):
     for i in range(len(rounds)):
         rounds[i].reverse()
     rounds.reverse() 
@@ -389,7 +383,7 @@ def parse_matches_feed(data: str) -> list[list[Match]]:
 
     return rounds
 
-def parse_results_rounds(client: FlashscoreClient, html: str, numbering: str) -> list[list[Match]]:
+def parse_results_rounds(client: FlashscoreClient, html: str) -> list[list[Match]]:
     feed = parse_initial_feed(html, "results")
 
     rounds: list[list[Match]] = []
@@ -406,7 +400,7 @@ def parse_results_rounds(client: FlashscoreClient, html: str, numbering: str) ->
         rounds += parse_matches_feed(response)
         i += 1
 
-    return get_correct_numbering(rounds, numbering) 
+    return get_correct_numbering(rounds) 
 
 def build_odds_api_url(event_id: str, project_id: str) -> str:
     return f"{ODDS_API_URL}?{urlencode({
@@ -620,7 +614,6 @@ def build_sheet_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--country", required=True)
     parser.add_argument("--league", required=True)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--numbering", choices=("begin", "end"), default="begin")
     parser.add_argument("--sheet", required=True)
     return parser
 
@@ -642,21 +635,20 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     league_html = client.fetch(url)
     project_id = extract_project_id(league_html)
 
-    rounds = parse_results_rounds(client, league_html, sheet_args.numbering)
-    total_matches = sum(len(round_matches) for round_matches in rounds)
-    if not rounds or total_matches == 0:
+    result_rounds = parse_results_rounds(client, league_html)
+    total_matches = sum(len(round_matches) for round_matches in result_rounds)
+    if not result_rounds or total_matches == 0:
         raise RuntimeError(
             f"На странице результатов не найдено матчей: {url}/results. "
             "Проверьте предыдущие сезоны в archive и укажите в --league"
         )
 
     matches_info: list[MatchInfo] = []
-    cnt_increase = 1
-    cnt_decrease = total_matches
-    for round_matches in rounds:
+    cnt = total_matches
+    for round_matches in result_rounds:
         for match in round_matches:
             info = MatchInfo(
-                number=cnt_increase if sheet_args.numbering == "begin" else cnt_decrease,
+                number=cnt,
                 round=match.round,
                 time=match.time,
                 team1=match.team1,
@@ -664,8 +656,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 score1=match.score1,
                 score2=match.score2,
             )
-            cnt_increase += 1
-            cnt_decrease -= 1
+            cnt -= 1
 
             odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
             handle_odds_json(odds_payload, match, info)
