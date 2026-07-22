@@ -383,6 +383,12 @@ def parse_matches_feed(data: str) -> list[list[Match]]:
 
     return rounds
 
+def parse_fixtures_rounds(html: str) -> list[list[Match]]:
+    feed = parse_initial_feed(html, "fixtures")
+    rounds = parse_matches_feed(feed["data"])
+
+    return rounds
+
 def parse_results_rounds(client: FlashscoreClient, html: str) -> list[list[Match]]:
     feed = parse_initial_feed(html, "results")
 
@@ -625,7 +631,7 @@ def parse_sheet_args(text: str, source_sheet_name: str) -> argparse.Namespace:
         raise RuntimeError(f"Некорректные аргументы в листе '{source_sheet_name}': {text}") from error
 
 
-def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float) -> list[MatchInfo]:
+def collect_results_matches(sheet_args: argparse.Namespace, delay: float, timeout: float) -> list[MatchInfo]:
     sport = normalize_args(sheet_args.sport)
     country = normalize_args(sheet_args.country)
     league = normalize_args(sheet_args.league)
@@ -644,12 +650,11 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
         )
 
     matches_info: list[MatchInfo] = []
-    number = total_matches
-    processing_cnt = 0
+    cnt = 1
     for round_matches in result_rounds:
         for match in round_matches:
             info = MatchInfo(
-                number=number,
+                number=cnt,
                 round=match.round,
                 time=match.time,
                 team1=match.team1,
@@ -657,8 +662,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 score1=int(match.score1),
                 score2=int(match.score2),
             )
-            number -= 1
-            processing_cnt += 1
+            cnt += 1
 
             odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
             handle_odds_json(odds_payload, match, info)
@@ -671,7 +675,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
 
             matches_info.append(info)
             print(
-                f"Обработан матч {processing_cnt}: "
+                f"Обработан матч {info.number}: "
                 f"тур {info.round}, {info.time}, "
                 f"{info.team1} {info.score1}:{info.score2} {info.team2}"
             )
@@ -703,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
 
         for index, (template, sheet_args) in enumerate(sheet_jobs):
             print(f"Лист {template.sheet_name}: сбор данных для {sheet_args.sport}/{sheet_args.country}/{sheet_args.league}.")
-            matches_info = collect_matches(sheet_args, args.delay, args.timeout)
+            matches_info = collect_results_matches(sheet_args, args.delay, args.timeout)
             print(f"Лист {template.sheet_name}: данные собраны. Заполнение файла...", flush=True)
             fill_xlsx_template(
                 [info.as_placeholder_row() for info in matches_info],
