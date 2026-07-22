@@ -644,11 +644,12 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
         )
 
     matches_info: list[MatchInfo] = []
-    cnt = total_matches
+    number = total_matches
+    processing_cnt = 0
     for round_matches in result_rounds:
         for match in round_matches:
             info = MatchInfo(
-                number=cnt,
+                number=number,
                 round=match.round,
                 time=match.time,
                 team1=match.team1,
@@ -656,7 +657,8 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 score1=int(match.score1),
                 score2=int(match.score2),
             )
-            cnt -= 1
+            number -= 1
+            processing_cnt += 1
 
             odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
             handle_odds_json(odds_payload, match, info)
@@ -669,7 +671,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
 
             matches_info.append(info)
             print(
-                f"Обработан матч {info.number}: "
+                f"Обработан матч {processing_cnt}: "
                 f"тур {info.round}, {info.time}, "
                 f"{info.team1} {info.score1}:{info.score2} {info.team2}"
             )
