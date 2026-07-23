@@ -85,6 +85,17 @@ def ensure_workbook_path(path: str | Path) -> Path:
 def keep_vba(path: Path) -> bool:
     return path.suffix.lower() == ".xlsm"
 
+
+def close_workbook(workbook: Any) -> None:
+    """Закрывает также ZIP-архив VBA, который openpyxl оставляет открытым."""
+    try:
+        workbook.close()
+    finally:
+        vba_archive = getattr(workbook, "vba_archive", None)
+        if vba_archive is not None:
+            vba_archive.close()
+
+
 def cell_text(value: Any) -> str:
     if isinstance(value, ArrayFormula):
         return value.text
@@ -456,21 +467,22 @@ def read_xlsx_template(
 ) -> XlsxTemplate:
     template_path = ensure_workbook_path(path)
     workbook = load_workbook(template_path, rich_text=True, keep_vba=keep_vba(template_path))
-    worksheet = workbook[sheet_name] if sheet_name else workbook.active
+    try:
+        worksheet = workbook[sheet_name] if sheet_name else workbook.active
 
-    if header_row < 1:
-        raise RuntimeError("Номер строки заголовков должен быть больше 0.")
+        if header_row < 1:
+            raise RuntimeError("Номер строки заголовков должен быть больше 0.")
 
-    sheet_title = worksheet.title
-    headers = [cell_text(cell.value) for cell in worksheet[header_row]]
-    row_templates: list[list[Any]] = []
+        sheet_title = worksheet.title
+        headers = [cell_text(cell.value) for cell in worksheet[header_row]]
+        row_templates: list[list[Any]] = []
 
-    for row in worksheet.iter_rows(min_row=header_row + 1):
-        if not row_has_value(row):
-            break
-        row_templates.append([cell.value for cell in row])
-
-    workbook.close()
+        for row in worksheet.iter_rows(min_row=header_row + 1):
+            if not row_has_value(row):
+                break
+            row_templates.append([cell.value for cell in row])
+    finally:
+        close_workbook(workbook)
 
     if not any(headers):
         raise RuntimeError("В .xlsx шаблоне не найдена строка заголовков.")
@@ -505,7 +517,7 @@ def read_xlsx_sheet_templates(path: str | Path) -> list[tuple[XlsxTemplate, str]
                 )
             sheet_configs.append((worksheet.title, config_text))
     finally:
-        workbook.close()
+        close_workbook(workbook)
 
     return [
         (read_xlsx_template(template_path, sheet_name), config_text)
@@ -533,64 +545,65 @@ def fill_xlsx_template(
     elif not output_path.exists():
         raise RuntimeError(f"Выходной файл не найден: {output_path}")
     workbook = load_workbook(output_path, rich_text=True, keep_vba=keep_vba(output_path))
-    worksheet = workbook[template.sheet_name]
-    start_row = template.header_row + 1
-    source_rows = template_rows(worksheet, start_row)
-    if not source_rows:
-        workbook.close()
-        raise RuntimeError("В .xlsx шаблоне не найдена строка с плейсхолдерами.")
+    try:
+        worksheet = workbook[template.sheet_name]
+        start_row = template.header_row + 1
+        source_rows = template_rows(worksheet, start_row)
+        if not source_rows:
+            raise RuntimeError("В .xlsx шаблоне не найдена строка с плейсхолдерами.")
 
-    rendered_rows = render_rich_rows(source_rows, data_rows, worksheet)
-    style_rows = [[cell for cell in row] for row in source_rows]
+        rendered_rows = render_rich_rows(source_rows, data_rows, worksheet)
+        style_rows = [[cell for cell in row] for row in source_rows]
 
-    array_formulas: dict[tuple[int, int], tuple[RenderedArrayFormula, str]] = {}
-    array_cells: set[tuple[int, int]] = set()
-    for row_offset, rendered_row in enumerate(rendered_rows):
-        target_row_index = start_row + row_offset
-        style_row = style_rows[row_offset % len(style_rows)]
-        for column_index, (value, _) in enumerate(rendered_row, start=1):
-            if not isinstance(value, RenderedArrayFormula):
-                continue
-            row_offset_from_source = target_row_index - style_row[column_index - 1].row
-            array_formulas[(target_row_index, column_index)] = (
-                value,
-                value.shifted_ref(row_offset_from_source),
-            )
-            array_cells.update(value.cells(row_offset_from_source))
+        array_formulas: dict[tuple[int, int], tuple[RenderedArrayFormula, str]] = {}
+        array_cells: set[tuple[int, int]] = set()
+        for row_offset, rendered_row in enumerate(rendered_rows):
+            target_row_index = start_row + row_offset
+            style_row = style_rows[row_offset % len(style_rows)]
+            for column_index, (value, _) in enumerate(rendered_row, start=1):
+                if not isinstance(value, RenderedArrayFormula):
+                    continue
+                row_offset_from_source = target_row_index - style_row[column_index - 1].row
+                array_formulas[(target_row_index, column_index)] = (
+                    value,
+                    value.shifted_ref(row_offset_from_source),
+                )
+                array_cells.update(value.cells(row_offset_from_source))
 
-    if keep_vba(output_path):
-        source_row_numbers = [row[0].row for row in source_rows]
-        workbook.close()
-        fill_template_with_excel(
-            output_path,
-            template.sheet_name,
-            start_row,
-            source_row_numbers,
-            rendered_rows,
-            target_sheet_name,
-        )
-        return
+        if keep_vba(output_path):
+            source_row_numbers = [row[0].row for row in source_rows]
+        else:
+            clear_template_area(worksheet, start_row)
 
-    clear_template_area(worksheet, start_row)
+            for row_offset, rendered_row in enumerate(rendered_rows):
+                target_row_index = start_row + row_offset
+                style_row = style_rows[row_offset % len(style_rows)]
+                for column_index, (value, conditional_fill) in enumerate(rendered_row, start=1):
+                    target_cell = worksheet.cell(row=target_row_index, column=column_index)
+                    if column_index <= len(style_row):
+                        source_cell = style_row[column_index - 1]
+                        copy_cell_style(source_cell, target_cell)
+                    if (target_row_index, column_index) in array_cells:
+                        continue
+                    target_cell.value = value
+                    if conditional_fill is not None:
+                        target_cell.fill = conditional_fill
 
-    for row_offset, rendered_row in enumerate(rendered_rows):
-        target_row_index = start_row + row_offset
-        style_row = style_rows[row_offset % len(style_rows)]
-        for column_index, (value, conditional_fill) in enumerate(rendered_row, start=1):
-            target_cell = worksheet.cell(row=target_row_index, column=column_index)
-            if column_index <= len(style_row):
-                source_cell = style_row[column_index - 1]
-                copy_cell_style(source_cell, target_cell)
-            if (target_row_index, column_index) in array_cells:
-                continue
-            target_cell.value = value
-            if conditional_fill is not None:
-                target_cell.fill = conditional_fill
+            for (row, column), (formula, array_ref) in array_formulas.items():
+                worksheet.cell(row=row, column=column).value = ArrayFormula(ref=array_ref, text=formula.formula)
 
-    for (row, column), (formula, array_ref) in array_formulas.items():
-        worksheet.cell(row=row, column=column).value = ArrayFormula(ref=array_ref, text=formula.formula)
+            if target_sheet_name is not None:
+                worksheet.title = target_sheet_name
+            workbook.save(output_path)
+            return
+    finally:
+        close_workbook(workbook)
 
-    if target_sheet_name is not None:
-        worksheet.title = target_sheet_name
-    workbook.save(output_path)
-    workbook.close()
+    fill_template_with_excel(
+        output_path,
+        template.sheet_name,
+        start_row,
+        source_row_numbers,
+        rendered_rows,
+        target_sheet_name,
+    )
