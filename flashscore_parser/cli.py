@@ -48,8 +48,8 @@ class Match:
     time: str = ""
     team1: str = ""
     team2: str = ""
-    score1: str = ""
-    score2: str = ""
+    score1: str | None = ""
+    score2: str | None = ""
 
 
 @dataclass(frozen=True)
@@ -80,8 +80,8 @@ class MatchInfo:
     time: str = ""
     team1: str = ""
     team2: str = ""
-    score1: int = 0
-    score2: int = 0
+    score1: int | None = 0
+    score2: int | None = 0
     win1: tuple[float, float] = (0.0, 0.0)
     draw: tuple[float, float] = (0.0, 0.0)
     win2: tuple[float, float] = (0.0, 0.0)
@@ -376,8 +376,8 @@ def parse_matches_feed(data: str) -> list[list[Match]]:
                 time=parse_timestamp(fields.get("AD")),
                 team1=fields.get("AE", ""),
                 team2=fields.get("AF", ""),
-                score1=fields.get("AG", ""),
-                score2=fields.get("AH", ""),
+                score1=fields.get("AG", None),
+                score2=fields.get("AH", None),
             )
         )
 
@@ -620,6 +620,7 @@ def build_sheet_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--country", required=True)
     parser.add_argument("--league", required=True)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--mode", choices=("results", "fixtures", "full"), default="full")
     parser.add_argument("--sheet", required=True)
     return parser
 
@@ -631,7 +632,7 @@ def parse_sheet_args(text: str, source_sheet_name: str) -> argparse.Namespace:
         raise RuntimeError(f"Некорректные аргументы в листе '{source_sheet_name}': {text}") from error
 
 
-def collect_results_matches(sheet_args: argparse.Namespace, delay: float, timeout: float) -> list[MatchInfo]:
+def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float) -> list[MatchInfo]:
     sport = normalize_args(sheet_args.sport)
     country = normalize_args(sheet_args.country)
     league = normalize_args(sheet_args.league)
@@ -642,6 +643,7 @@ def collect_results_matches(sheet_args: argparse.Namespace, delay: float, timeou
     project_id = extract_project_id(league_html)
 
     result_rounds = parse_results_rounds(client, league_html)
+    fixture_rounds = parse_fixtures_rounds(league_html)
     total_matches = sum(len(round_matches) for round_matches in result_rounds)
     if not result_rounds or total_matches == 0:
         raise RuntimeError(
@@ -651,34 +653,69 @@ def collect_results_matches(sheet_args: argparse.Namespace, delay: float, timeou
 
     matches_info: list[MatchInfo] = []
     cnt = 1
-    for round_matches in result_rounds:
-        for match in round_matches:
-            info = MatchInfo(
-                number=cnt,
-                round=match.round,
-                time=match.time,
-                team1=match.team1,
-                team2=match.team2,
-                score1=int(match.score1),
-                score2=int(match.score2),
-            )
-            cnt += 1
 
-            odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
-            handle_odds_json(odds_payload, match, info)
-            if delay > 0:
-                time.sleep(delay)
+    if sheet_args.mode in {"results", "full"}:
+        for round_matches in result_rounds:
+            for match in round_matches:
+                info = MatchInfo(
+                    number=cnt,
+                    round=match.round,
+                    time=match.time,
+                    team1=match.team1,
+                    team2=match.team2,
+                    score1=int(match.score1),
+                    score2=int(match.score2),
+                )
+                cnt += 1
 
-            h2h_url = build_feed_url(project_id, f"df_hh_1_{match.event_id}")
-            h2h_payload = client.fetch_feed(h2h_url)
-            handle_h2h(h2h_payload, info)
+                odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
+                handle_odds_json(odds_payload, match, info)
+                if delay > 0:
+                    time.sleep(delay)
 
-            matches_info.append(info)
-            print(
-                f"Обработан матч {info.number}: "
-                f"тур {info.round}, {info.time}, "
-                f"{info.team1} {info.score1}:{info.score2} {info.team2}"
-            )
+                h2h_url = build_feed_url(project_id, f"df_hh_1_{match.event_id}")
+                h2h_payload = client.fetch_feed(h2h_url)
+                handle_h2h(h2h_payload, info)
+
+                matches_info.append(info)
+                print(
+                    f"Обработан матч {info.number}: "
+                    f"тур {info.round}, {info.time}, "
+                    f"{info.team1} {info.score1}:{info.score2} {info.team2}"
+                )
+
+    if sheet_args.mode in {"fixtures", "full"}:
+        for round_matches in fixture_rounds:
+            for match in round_matches:
+                info = MatchInfo(
+                    number=cnt,
+                    round=match.round,
+                    time=match.time,
+                    team1=match.team1,
+                    team2=match.team2,
+                    score1=match.score1,
+                    score2=match.score2,
+                )
+                cnt += 1
+
+                odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
+                handle_odds_json(odds_payload, match, info)
+                if not all(pair[0] > 0 and pair[1] > 0 for pair in (info.win1, info.draw, info.win2)):
+                    return matches_info
+                if delay > 0:
+                    time.sleep(delay)
+
+                h2h_url = build_feed_url(project_id, f"df_hh_1_{match.event_id}")
+                h2h_payload = client.fetch_feed(h2h_url)
+                handle_h2h(h2h_payload, info)
+
+                matches_info.append(info)
+                print(
+                    f"Обработан матч {info.number}: "
+                    f"тур {info.round}, {info.time}, "
+                    f"{info.team1} {info.score1}:{info.score2} {info.team2}"
+                )
+
     return matches_info
 
 
@@ -707,7 +744,7 @@ def main(argv: list[str] | None = None) -> int:
 
         for index, (template, sheet_args) in enumerate(sheet_jobs):
             print(f"Лист {template.sheet_name}: сбор данных для {sheet_args.sport}/{sheet_args.country}/{sheet_args.league}.")
-            matches_info = collect_results_matches(sheet_args, args.delay, args.timeout)
+            matches_info = collect_matches(sheet_args, args.delay, args.timeout)
             print(f"Лист {template.sheet_name}: данные собраны. Заполнение файла...", flush=True)
             fill_xlsx_template(
                 [info.as_placeholder_row() for info in matches_info],
