@@ -124,19 +124,14 @@ def fill_template_with_excel(
             worksheet.api.Rows(f"{start_row}:{last_row}").Delete()
 
         total_rows = len(rendered_rows)
-        array_formulas: dict[tuple[int, int], tuple[Any, str]] = {}
         array_cells: set[tuple[int, int]] = set()
         for row_offset, rendered_row in enumerate(rendered_rows):
             target_row = start_row + row_offset
             source_row = source_row_numbers[row_offset % len(source_row_numbers)]
-            for column, (value, _) in enumerate(rendered_row, start=1):
+            for value, _ in rendered_row:
                 if not hasattr(value, "array_ref"):
                     continue
                 row_offset_from_source = target_row - source_row
-                array_formulas[(target_row, column)] = (
-                    value,
-                    value.shifted_ref(row_offset_from_source),
-                )
                 array_cells.update(value.cells(row_offset_from_source))
 
         print(f"Excel: заполнение {total_rows} строк...", flush=True)
@@ -163,9 +158,6 @@ def fill_template_with_excel(
 
             if (row_offset + 1) % 100 == 0 or row_offset + 1 == total_rows:
                 print(f"Excel: заполнено {row_offset + 1}/{total_rows} строк.", flush=True)
-
-        for _, (formula, array_ref) in array_formulas.items():
-            worksheet.range(array_ref).api.FormulaArray = formula.formula
 
         source_sheet.delete()
         source_sheet = None
