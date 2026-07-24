@@ -11,9 +11,24 @@ try:
 except ImportError:
     xw = None
 
+XL_GENERAL_NUMBER_FORMAT_RU = "Общий"
+
+
+def copied_formula_needs_no_rendering(source_cell: Any) -> bool:
+    """Скопированная Excel-формула сама сдвигает ссылки при вставке строки."""
+    if not source_cell.api.HasFormula:
+        return False
+    return "{" not in str(source_cell.api.Formula)
+
+
 def write_excel_text(cell: Any, text: str) -> None:
     if text.startswith("="):
-        cell.api.Formula = text
+        application = cell.api.Application
+        if cell.api.NumberFormat == "@":
+            cell.api.NumberFormatLocal = XL_GENERAL_NUMBER_FORMAT_RU
+        decimal_separator = application.DecimalSeparator
+        formula = re.sub(r"(?<=\d)\.(?=\d)", decimal_separator, text)
+        cell.api.FormulaLocal = formula
         return
     cell.api.NumberFormat = "@"
     cell.api.Value = text
@@ -147,11 +162,18 @@ def fill_template_with_excel(
                 if (target_row, column) in array_cells:
                     continue
 
-                if hasattr(value, "_opt"):
-                    write_excel_rich_text(target_cell, value)
-                else:
-                    rendered_value = "" if value is None else str(value)
-                    write_excel_text(target_cell, rendered_value)
+                source_cell = source_sheet.cells(source_row, column)
+                try:
+                    if not copied_formula_needs_no_rendering(source_cell):
+                        if hasattr(value, "_opt"):
+                            write_excel_rich_text(target_cell, value)
+                        else:
+                            rendered_value = "" if value is None else str(value)
+                            write_excel_text(target_cell, rendered_value)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"Лист {worksheet.name}, ячейка {target_cell.address}: {error}"
+                    ) from error
 
                 if conditional_fill is not None:
                     apply_excel_fill(target_cell, conditional_fill)
