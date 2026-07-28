@@ -6,6 +6,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from openpyxl.formula.translate import Translator
+from openpyxl.utils import get_column_letter
+
 try:
     import xlwings as xw
 except ImportError:
@@ -19,6 +22,18 @@ def copied_formula_needs_no_rendering(source_cell: Any) -> bool:
     if not source_cell.api.HasFormula:
         return False
     return "{" not in str(source_cell.api.Formula)
+
+
+def shift_rendered_formula(
+    formula: str,
+    source_row: int,
+    source_column: int,
+    target_row: int,
+    target_column: int,
+) -> str:
+    origin = f"{get_column_letter(source_column)}{source_row}"
+    target = f"{get_column_letter(target_column)}{target_row}"
+    return Translator(formula, origin=origin).translate_formula(target)
 
 
 def write_excel_text(cell: Any, text: str) -> None:
@@ -166,9 +181,28 @@ def fill_template_with_excel(
                 try:
                     if not copied_formula_needs_no_rendering(source_cell):
                         if hasattr(value, "_opt"):
-                            write_excel_rich_text(target_cell, value)
+                            rendered_value = str(value)
+                            if rendered_value.startswith("="):
+                                rendered_value = shift_rendered_formula(
+                                    rendered_value,
+                                    source_row,
+                                    column,
+                                    target_row,
+                                    column,
+                                )
+                                write_excel_text(target_cell, rendered_value)
+                            else:
+                                write_excel_rich_text(target_cell, value)
                         else:
                             rendered_value = "" if value is None else str(value)
+                            if rendered_value.startswith("="):
+                                rendered_value = shift_rendered_formula(
+                                    rendered_value,
+                                    source_row,
+                                    column,
+                                    target_row,
+                                    column,
+                                )
                             write_excel_text(target_cell, rendered_value)
                 except Exception as error:
                     raise RuntimeError(
