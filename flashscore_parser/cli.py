@@ -143,15 +143,6 @@ def parse_matches_feed(data: str) -> list[list[Match]]:
 
     return rounds
 
-def build_odds_api_url(event_id: str, project_id: str) -> str:
-    return f"{ODDS_API_URL}?{urlencode({
-        '_hash': 'oce',
-        'eventId': event_id,
-        'projectId': project_id,
-        'geoIpCode': 'CH',
-        'geoIpSubdivisionCode': 'CHZH',
-    })}"
-
 def odds_pair(item: dict[str, Any]) -> tuple[float, float]:
     value = item.get("value")
     opening = item.get("opening") or value
@@ -425,8 +416,17 @@ class FlashscoreClient:
         return data
 
 class OddsParserIT:
-    def parse_odds(client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
-        payload = client.fetch_json(build_odds_api_url(match.event_id, client.project_id))
+    def build_odds_api_url(event_id: str, project_id: str) -> str:
+        return f"{ODDS_API_URL}?{urlencode({
+            '_hash': 'oce',
+            'eventId': event_id,
+            'projectId': project_id,
+            'geoIpCode': 'CH',
+            'geoIpSubdivisionCode': 'CHZH',
+        })}"
+
+    def parse_odds(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        payload = client.fetch_json(self.build_odds_api_url(match.event_id, client.project_id))
     
         apply_participant_market(
             market_items(find_market(payload, "HOME_DRAW_AWAY")),
@@ -502,8 +502,7 @@ class OddsParserIT:
             elif item.get("selection") == "EVEN":
                 info.even = odds_pair(item)
 
-
-    def parse_h2h(client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+    def parse_h2h(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
         h2h_url = build_feed_url(client.project_id, f"df_hh_1_{match.event_id}")
         payload = client.fetch_feed(h2h_url)
         
@@ -549,7 +548,7 @@ class OddsParserIT:
 
 def create_odds_parser(lang: str):
     if lang == "it":
-        return OddsParserIT
+        return OddsParserIT()
 
 def parse_fixtures_rounds(html: str) -> list[list[Match]]:
     feed = parse_initial_feed(html, "fixtures")
