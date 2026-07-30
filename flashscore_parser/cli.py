@@ -169,7 +169,7 @@ def find_market(
 ) -> dict[str, Any] | None:
     for market in market_odds(payload):
         if (
-            market.get("bookmakerId") in book_id
+            market.get("bookmakerId") == book_id
             and market.get("bettingType") == betting_type
             and market.get("bettingScope") == betting_scope
         ):
