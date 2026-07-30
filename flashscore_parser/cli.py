@@ -20,7 +20,6 @@ from flashscore_parser.table_io import fill_xlsx_template, read_xlsx_sheet_templ
 
 FEED_BASE_URL_TEMPLATE = "https://{project_id}.flashscore.ninja/{project_id}/x/feed"
 ODDS_API_URL = "https://global.ds.lsapp.eu/odds/pq_graphql"
-VALID_BOOK_ID = {16, 419}
 
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
@@ -164,8 +163,8 @@ def market_odds(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def find_market(
     payload: dict[str, Any],
     betting_type: str,
-    betting_scope: str = "FULL_TIME",
-    book_id: set[int] = VALID_BOOK_ID
+    betting_scope: str,
+    book_id: int
 ) -> dict[str, Any] | None:
     for market in market_odds(payload):
         if (
@@ -416,6 +415,9 @@ class FlashscoreClient:
         return data
 
 class OddsParserIT:
+    BOOKMAKER_ID = 419
+    BET_SCOPE = "FULL_TIME"
+
     def build_odds_api_url(event_id: str, project_id: str) -> str:
         return f"{ODDS_API_URL}?{urlencode({
             '_hash': 'oce',
@@ -429,14 +431,14 @@ class OddsParserIT:
         payload = client.fetch_json(self.build_odds_api_url(match.event_id, client.project_id))
     
         apply_participant_market(
-            market_items(find_market(payload, "HOME_DRAW_AWAY")),
+            market_items(find_market(payload, "HOME_DRAW_AWAY", self.BET_SCOPE, self.BOOKMAKER_ID)),
             match,
             lambda pair: setattr(info, "win1", pair),
             lambda pair: setattr(info, "win2", pair),
             lambda pair: setattr(info, "draw", pair),
         )
 
-        for item in market_items(find_market(payload, "OVER_UNDER")):
+        for item in market_items(find_market(payload, "OVER_UNDER", self.BET_SCOPE, self.BOOKMAKER_ID)):
             key = handicap_key(item)
             if not key:
                 continue
@@ -445,21 +447,21 @@ class OddsParserIT:
             elif item.get("selection") == "UNDER":
                 info.under[key] = odds_pair(item)
 
-        for item in market_items(find_market(payload, "BOTH_TEAMS_TO_SCORE")):
+        for item in market_items(find_market(payload, "BOTH_TEAMS_TO_SCORE", self.BET_SCOPE, self.BOOKMAKER_ID)):
             if item.get("bothTeamsToScore") is True:
                 info.both_yes = odds_pair(item)
             elif item.get("bothTeamsToScore") is False:
                 info.both_no = odds_pair(item)
 
         apply_participant_market(
-            market_items(find_market(payload, "DOUBLE_CHANCE")),
+            market_items(find_market(payload, "DOUBLE_CHANCE", self.BET_SCOPE, self.BOOKMAKER_ID)),
             match,
             lambda pair: setattr(info, "double_1x", pair),
             lambda pair: setattr(info, "double_x2", pair),
             lambda pair: setattr(info, "double_12", pair),
         )
 
-        for item in market_items(find_market(payload, "ASIAN_HANDICAP")):
+        for item in market_items(find_market(payload, "ASIAN_HANDICAP", self.BET_SCOPE, self.BOOKMAKER_ID)):
             key = handicap_key(item)
             if not key:
                 continue
@@ -468,7 +470,7 @@ class OddsParserIT:
             elif item.get("eventParticipantId") == match.team2_participant_id:
                 info.asian_2[key] = odds_pair(item)
 
-        for item in market_items(find_market(payload, "EUROPEAN_HANDICAP")):
+        for item in market_items(find_market(payload, "EUROPEAN_HANDICAP", self.BET_SCOPE, self.BOOKMAKER_ID)):
             key = handicap_key(item)
             if not key:
                 continue
@@ -480,23 +482,23 @@ class OddsParserIT:
                 info.european_x[key] = odds_pair(item)
 
         apply_participant_market(
-            market_items(find_market(payload, "DRAW_NO_BET")),
+            market_items(find_market(payload, "DRAW_NO_BET", self.BET_SCOPE, self.BOOKMAKER_ID)),
             match,
             lambda pair: setattr(info, "no_bet_1", pair),
             lambda pair: setattr(info, "no_bet_2", pair),
         )
 
-        for item in market_items(find_market(payload, "CORRECT_SCORE")):
+        for item in market_items(find_market(payload, "CORRECT_SCORE", self.BET_SCOPE, self.BOOKMAKER_ID)):
             score = item.get("score")
             if score:
                 info.correct[str(score)] = odds_pair(item)
 
-        for item in market_items(find_market(payload, "HALF_FULL_TIME")):
+        for item in market_items(find_market(payload, "HALF_FULL_TIME", self.BET_SCOPE, self.BOOKMAKER_ID)):
             winner = item.get("winner")
             if winner:
                 info.ht_ft[str(winner)] = odds_pair(item)
 
-        for item in market_items(find_market(payload, "ODD_OR_EVEN")):
+        for item in market_items(find_market(payload, "ODD_OR_EVEN", self.BET_SCOPE, self.BOOKMAKER_ID)):
             if item.get("selection") == "ODD":
                 info.odd = odds_pair(item)
             elif item.get("selection") == "EVEN":
@@ -546,9 +548,64 @@ class OddsParserIT:
         info.h2h = sections
         
 
+class OddsParserKz(OddsParserIT):
+    BOOKMAKER_ID = 3
+    BET_SCOPE = "FULL_TIME"
+
+    def build_odds_api_url(self, event_id: str, bet_type: str) -> str:
+        return f"{ODDS_API_URL}?{urlencode({
+            '_hash': 'ope2',
+            'eventId': event_id,
+            'bookmakerId': self.BOOKMAKER_ID,
+            'betType': bet_type,
+            'betScope': self.BET_SCOPE,
+        })}"
+
+    def fetch_market(
+        self,
+        client: FlashscoreClient,
+        event_id: str,
+        bet_type: str,
+    ) -> dict[str, Any]:
+        payload = client.fetch_json(self.build_odds_api_url(event_id, bet_type))
+        market = payload.get("data", {}).get("findPrematchOddsForBookmaker", {})
+        return market if isinstance(market, dict) else {}
+
+    def parse_odds(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        home_draw_away = self.fetch_market(client, match.event_id, "HOME_DRAW_AWAY")
+        info.win1 = odds_pair(home_draw_away.get("home", {}))
+        info.draw = odds_pair(home_draw_away.get("draw", {}))
+        info.win2 = odds_pair(home_draw_away.get("away", {}))
+
+        over_under = self.fetch_market(client, match.event_id, "OVER_UNDER")
+        for opportunity in over_under.get("opportunities", []):
+            if not isinstance(opportunity, dict):
+                continue
+            key = handicap_key(opportunity)
+            if key:
+                info.over[key] = odds_pair(opportunity.get("over", {}))
+                info.under[key] = odds_pair(opportunity.get("under", {}))
+
+        asian_handicap = self.fetch_market(client, match.event_id, "ASIAN_HANDICAP")
+        for opportunity in asian_handicap.get("opportunities", []):
+            if not isinstance(opportunity, dict):
+                continue
+            key = handicap_key(opportunity)
+            if key:
+                info.asian_1[key] = odds_pair(opportunity.get("home", {}))
+                info.asian_2[key] = odds_pair(opportunity.get("away", {}))
+
+        both_teams_to_score = self.fetch_market(client, match.event_id, "BOTH_TEAMS_TO_SCORE")
+        info.both_yes = odds_pair(both_teams_to_score.get("yes", {}))
+        info.both_no = odds_pair(both_teams_to_score.get("no", {}))
+
+
 def create_odds_parser(lang: str):
     if lang == "it":
         return OddsParserIT()
+    if lang == "kz":
+        return OddsParserKz()
+    raise RuntimeError(f"Не поддерживается язык коэффициентов: {lang}")
 
 def parse_fixtures_rounds(html: str) -> list[list[Match]]:
     feed = parse_initial_feed(html, "fixtures")
