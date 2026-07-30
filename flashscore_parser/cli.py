@@ -88,6 +88,134 @@ INITIAL_FEED_RE = re.compile(
     re.S | re.X,
 )
 
+def parse_initial_feed(html: str, name: str) -> dict[str, str]:
+    feeds = {
+        match.group("name"): {
+            "data": match.group("data"),
+            "allEventsCount": match.group("all_events_count"),
+            "seasonId": match.group("season_id"),
+        }
+        for match in INITIAL_FEED_RE.finditer(html)
+    }
+    
+    data = feeds.get(name)
+    if data is None:
+        raise RuntimeError(f"initial feed {name!r} не найден.")
+    
+    return data
+
+def parse_feed_record(record: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for part in record.split("¬"):
+        if "÷" not in part:
+            continue
+        key, value = part.split("÷", 1)
+        fields[key] = value.replace("\\/", "/")
+    return fields
+
+def parse_matches_feed(data: str) -> list[list[Match]]:
+    rounds: list[list[Match]] = []
+    round_indexes: dict[str, int] = {}
+
+    for record in data.split("¬~"):
+        fields = parse_feed_record(record)
+        if "AA" not in fields:
+            continue
+
+        round_name = extract_round_number(fields.get("ER", ""))
+        if round_name not in round_indexes:
+            round_indexes[round_name] = len(rounds)
+            rounds.append([])
+
+        rounds[round_indexes[round_name]].append(
+            Match(
+                round=round_name,
+                event_id=fields.get("AA", ""),
+                team1_participant_id=fields.get("JA", ""),
+                team2_participant_id=fields.get("JB", ""),
+                time=parse_timestamp(fields.get("AD")),
+                team1=fields.get("AE", ""),
+                team2=fields.get("AF", ""),
+                score1=fields.get("AG", None),
+                score2=fields.get("AH", None),
+            )
+        )
+
+    return rounds
+
+def build_odds_api_url(event_id: str, project_id: str) -> str:
+    return f"{ODDS_API_URL}?{urlencode({
+        '_hash': 'oce',
+        'eventId': event_id,
+        'projectId': project_id,
+        'geoIpCode': 'CH',
+        'geoIpSubdivisionCode': 'CHZH',
+    })}"
+
+def odds_pair(item: dict[str, Any]) -> tuple[float, float]:
+    value = item.get("value")
+    opening = item.get("opening") or value
+    try:
+        return (float(opening), float(value))
+    except (TypeError, ValueError):
+        return (0.0, 0.0)
+
+def market_odds(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    odds = (
+        payload.get("data", {})
+        .get("findOddsByEventId", {})
+        .get("odds", [])
+    )
+    if not isinstance(odds, list):
+        return []
+    return [market for market in odds if isinstance(market, dict)]
+
+def find_market(
+    payload: dict[str, Any],
+    betting_type: str,
+    betting_scope: str = "FULL_TIME",
+    book_id: set[int] = VALID_BOOK_ID
+) -> dict[str, Any] | None:
+    for market in market_odds(payload):
+        if (
+            market.get("bookmakerId") in book_id
+            and market.get("bettingType") == betting_type
+            and market.get("bettingScope") == betting_scope
+        ):
+            return market
+    return None
+
+def market_items(market: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not market:
+        return []
+    odds = market.get("odds", [])
+    if not isinstance(odds, list):
+        return []
+    return [item for item in odds if isinstance(item, dict)]
+
+def handicap_key(item: dict[str, Any]) -> str:
+    handicap = item.get("handicap")
+    if not isinstance(handicap, dict):
+        return ""
+    value = handicap.get("value")
+    return "" if value is None else str(value)
+
+def apply_participant_market(
+    items: list[dict[str, Any]],
+    match: Match,
+    home_setter,
+    away_setter,
+    draw_setter=None,
+) -> None:
+    for item in items:
+        participant_id = item.get("eventParticipantId")
+        pair = odds_pair(item)
+        if participant_id == match.team1_participant_id:
+            home_setter(pair)
+        elif participant_id == match.team2_participant_id:
+            away_setter(pair)
+        elif participant_id is None and draw_setter is not None:
+            draw_setter(pair)
 
 @dataclass(frozen=True)
 class Link:
@@ -423,61 +551,6 @@ def create_odds_parser(lang: str):
     if lang == "it":
         return OddsParserIT
 
-def parse_initial_feed(html: str, name: str) -> dict[str, str]:
-    feeds = {
-        match.group("name"): {
-            "data": match.group("data"),
-            "allEventsCount": match.group("all_events_count"),
-            "seasonId": match.group("season_id"),
-        }
-        for match in INITIAL_FEED_RE.finditer(html)
-    }
-    
-    data = feeds.get(name)
-    if data is None:
-        raise RuntimeError(f"initial feed {name!r} не найден.")
-    
-    return data
-
-def parse_feed_record(record: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for part in record.split("¬"):
-        if "÷" not in part:
-            continue
-        key, value = part.split("÷", 1)
-        fields[key] = value.replace("\\/", "/")
-    return fields
-
-def parse_matches_feed(data: str) -> list[list[Match]]:
-    rounds: list[list[Match]] = []
-    round_indexes: dict[str, int] = {}
-
-    for record in data.split("¬~"):
-        fields = parse_feed_record(record)
-        if "AA" not in fields:
-            continue
-
-        round_name = extract_round_number(fields.get("ER", ""))
-        if round_name not in round_indexes:
-            round_indexes[round_name] = len(rounds)
-            rounds.append([])
-
-        rounds[round_indexes[round_name]].append(
-            Match(
-                round=round_name,
-                event_id=fields.get("AA", ""),
-                team1_participant_id=fields.get("JA", ""),
-                team2_participant_id=fields.get("JB", ""),
-                time=parse_timestamp(fields.get("AD")),
-                team1=fields.get("AE", ""),
-                team2=fields.get("AF", ""),
-                score1=fields.get("AG", None),
-                score2=fields.get("AH", None),
-            )
-        )
-
-    return rounds
-
 def parse_fixtures_rounds(html: str) -> list[list[Match]]:
     feed = parse_initial_feed(html, "fixtures")
     rounds = parse_matches_feed(feed["data"])
@@ -502,80 +575,6 @@ def parse_results_rounds(client: FlashscoreClient, html: str) -> list[list[Match
         i += 1
 
     return get_correct_numbering(rounds) 
-
-def build_odds_api_url(event_id: str, project_id: str) -> str:
-    return f"{ODDS_API_URL}?{urlencode({
-        '_hash': 'oce',
-        'eventId': event_id,
-        'projectId': project_id,
-        'geoIpCode': 'CH',
-        'geoIpSubdivisionCode': 'CHZH',
-    })}"
-
-def odds_pair(item: dict[str, Any]) -> tuple[float, float]:
-    value = item.get("value")
-    opening = item.get("opening") or value
-    try:
-        return (float(opening), float(value))
-    except (TypeError, ValueError):
-        return (0.0, 0.0)
-
-def market_odds(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    odds = (
-        payload.get("data", {})
-        .get("findOddsByEventId", {})
-        .get("odds", [])
-    )
-    if not isinstance(odds, list):
-        return []
-    return [market for market in odds if isinstance(market, dict)]
-
-def find_market(
-    payload: dict[str, Any],
-    betting_type: str,
-    betting_scope: str = "FULL_TIME",
-    book_id: set[int] = VALID_BOOK_ID
-) -> dict[str, Any] | None:
-    for market in market_odds(payload):
-        if (
-            market.get("bookmakerId") in book_id
-            and market.get("bettingType") == betting_type
-            and market.get("bettingScope") == betting_scope
-        ):
-            return market
-    return None
-
-def market_items(market: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not market:
-        return []
-    odds = market.get("odds", [])
-    if not isinstance(odds, list):
-        return []
-    return [item for item in odds if isinstance(item, dict)]
-
-def handicap_key(item: dict[str, Any]) -> str:
-    handicap = item.get("handicap")
-    if not isinstance(handicap, dict):
-        return ""
-    value = handicap.get("value")
-    return "" if value is None else str(value)
-
-def apply_participant_market(
-    items: list[dict[str, Any]],
-    match: Match,
-    home_setter,
-    away_setter,
-    draw_setter=None,
-) -> None:
-    for item in items:
-        participant_id = item.get("eventParticipantId")
-        pair = odds_pair(item)
-        if participant_id == match.team1_participant_id:
-            home_setter(pair)
-        elif participant_id == match.team2_participant_id:
-            away_setter(pair)
-        elif participant_id is None and draw_setter is not None:
-            draw_setter(pair)
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
