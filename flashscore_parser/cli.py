@@ -7,6 +7,7 @@ import shlex
 import sys
 import time
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -414,11 +415,64 @@ class FlashscoreClient:
             raise RuntimeError(f"Flashscore вернул JSON неожиданного типа для {url}")
         return data
 
-class OddsParserIT:
+class OddsParser(ABC):
+    @abstractmethod
+    def parse_odds(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        """Заполняет коэффициенты матча."""
+
+    @abstractmethod
+    def parse_h2h(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        """Заполняет историю очных встреч матча."""
+
+    def _parse_h2h(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        h2h_url = build_feed_url(client.project_id, f"df_hh_1_{match.event_id}")
+        payload = client.fetch_feed(h2h_url)
+
+        sections: dict[str, list[H2HMatch]] = {}
+        category_index = -1
+        section_index = 0
+
+        for record in payload.split("¬~"):
+            fields = parse_feed_record(record)
+            if "KA" in fields:
+                category_index += 1
+                section_index = 0
+            if "KB" in fields:
+                section_index += 1
+
+            if "KP" not in fields:
+                continue
+
+            section_name = ""
+            if category_index == 0 and section_index == 3:
+                section_name = "h2h"
+            elif category_index == 1 and section_index == 1:
+                section_name = "home"
+            elif category_index == 2 and section_index == 1:
+                section_name = "away"
+
+            if not section_name:
+                continue
+
+            sections.setdefault(section_name, []).append(
+                H2HMatch(
+                    time=parse_timestamp(fields.get("KC")),
+                    team1=fields.get("KJ", "").lstrip("*"),
+                    team2=fields.get("KK", "").lstrip("*"),
+                    score1=int(fields.get("KU", "")),
+                    score2=int(fields.get("KT", "")),
+                    result=fields.get("WIS", ""),
+                )
+            )
+
+        info.h2h = sections
+
+
+class OddsParserIT(OddsParser):
     BOOKMAKER_ID = 419
     BET_SCOPE = "FULL_TIME"
 
-    def build_odds_api_url(event_id: str, project_id: str) -> str:
+    def build_odds_api_url(self, event_id: str, project_id: str) -> str:
         return f"{ODDS_API_URL}?{urlencode({
             '_hash': 'oce',
             'eventId': event_id,
@@ -505,50 +559,10 @@ class OddsParserIT:
                 info.even = odds_pair(item)
 
     def parse_h2h(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
-        h2h_url = build_feed_url(client.project_id, f"df_hh_1_{match.event_id}")
-        payload = client.fetch_feed(h2h_url)
-        
-        sections: dict[str, list[H2HMatch]] = {}
-        category_index = -1
-        section_index = 0
-    
-        for record in payload.split("¬~"):
-            fields = parse_feed_record(record)
-            if "KA" in fields:
-                category_index += 1
-                section_index = 0
-            if "KB" in fields:
-                section_index += 1
-    
-            if "KP" not in fields:
-                continue
-            
-            section_name = ""
-            if category_index == 0 and section_index == 3:
-                section_name = "h2h"
-            elif category_index == 1 and section_index == 1:
-                section_name = "home"
-            elif category_index == 2 and section_index == 1:
-                section_name = "away"
-    
-            if not section_name:
-                continue
-    
-            sections.setdefault(section_name, []).append(
-                H2HMatch(
-                    time=parse_timestamp(fields.get("KC")),
-                    team1=fields.get("KJ", "").lstrip("*"),
-                    team2=fields.get("KK", "").lstrip("*"),
-                    score1=int(fields.get("KU", "")),
-                    score2=int(fields.get("KT", "")),
-                    result=fields.get("WIS", ""),
-                )
-            )
+        self._parse_h2h(client, match, info)
 
-        info.h2h = sections
-        
 
-class OddsParserKz(OddsParserIT):
+class OddsParserKz(OddsParser):
     BOOKMAKER_ID = 3
     BET_SCOPE = "FULL_TIME"
 
@@ -599,8 +613,11 @@ class OddsParserKz(OddsParserIT):
         info.both_yes = odds_pair(both_teams_to_score.get("yes", {}))
         info.both_no = odds_pair(both_teams_to_score.get("no", {}))
 
+    def parse_h2h(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        self._parse_h2h(client, match, info)
 
-def create_odds_parser(lang: str):
+
+def create_odds_parser(lang: str) -> OddsParser:
     if lang == "it":
         return OddsParserIT()
     if lang == "kz":
