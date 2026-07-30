@@ -35,7 +35,7 @@ python run.py --template template.xlsm --output report.xlsm --delay 0.3
 Пример: лист называется `A1`, а ячейка `A1` содержит:
 
 ```text
---sport calcio --country cina --league supercoppa --mode full --sheet "China Super Cup"
+--sport calcio --country cina --league supercoppa --lang it --mode full --sheet "China Super Cup"
 ```
 
 Аргументы в ячейке:
@@ -45,11 +45,17 @@ python run.py --template template.xlsm --output report.xlsm --delay 0.3
 | `--sport` | Раздел сайта. По умолчанию `football`; для итальянского URL футбола используется `calcio`. |
 | `--country` | Обязательный slug страны из URL, например `germany` или `cina`. |
 | `--league` | Обязательный slug лиги из URL, например `bundesliga` или `supercoppa`. |
-| `--base-url` | Базовый адрес Flashscore. По умолчанию `https://www.flashscore.it/`. |
+| `--lang` | Источник данных: `it` - Flashscore Italy, значение по умолчанию; `kz` - Flashscore Kazakhstan. |
 | `--mode` | `results` - сыгранные матчи; `fixtures` - будущие; `full` - оба типа, значение по умолчанию. |
 | `--sheet` | Обязательное итоговое имя листа. Если есть пробелы, заключите имя в кавычки. |
 
 Например, два листа с именами `A1` и `Z1` позволят заполнить две лиги за один запуск. Для будущих матчей программа останавливает загрузку, когда не находит основные коэффициенты `1-X-2`.
+
+### Источники коэффициентов
+
+`--lang it` получает коэффициенты одним запросом и поддерживает все перечисленные ниже рынки, когда они доступны у букмекера.
+
+`--lang kz` запрашивает только рынки полного времени (`FULL_TIME`) отдельными запросами. Доступны исход `1-X-2`, тоталы, азиатская фора и «обе забьют». Остальные плейсхолдеры коэффициентов останутся пустыми.
 
 ## Плейсхолдеры
 
