@@ -18,21 +18,76 @@ from bs4 import BeautifulSoup
 
 from flashscore_parser.table_io import fill_xlsx_template, read_xlsx_sheet_templates
 
-DEFAULT_BASE_URL = "https://www.flashscore.it/"
 FEED_BASE_URL_TEMPLATE = "https://{project_id}.flashscore.ninja/{project_id}/x/feed"
 ODDS_API_URL = "https://global.ds.lsapp.eu/odds/pq_graphql"
 VALID_BOOK_ID = {16, 419}
 
-LEAGUE_ALIAS = {
-    "group" : "tabs__group",
-    "summary" : "summary",
-    "odds" : "odds_comparison",
-    "news" : "news",
-    "results" : "results",
-    "fixtures": "fixtures",
-    "standings": "standings_table",
-    "archive": "archive",
-}
+def normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+def normalize_args(value: str) -> str:
+    normalized = normalize_text(value).casefold().replace("_", "-")
+    return normalized
+
+def get_odds(tag: BeautifulSoup) -> tuple[float, float]:
+    if (tag.get("title")):
+        parts = re.split(r"\s+»\s+", tag.get("title"))
+        return map(float, parts)
+    
+    odd = float(tag.select_one("span").get_text(strip=True))
+    return (odd, odd)
+
+def extract_round_number(round_name: str) -> str:
+    match = re.search(r"\d+", round_name)
+    return match.group() if match else round_name
+
+def tab_url(tabs: dict[str, Link], alias: str) -> str | None:
+    link = tabs.get(alias, None)
+    return link.url if link and link.url else None
+
+def parse_timestamp(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(value)).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return value
+
+def get_correct_numbering(rounds: list[list[Match]]):
+    for i in range(len(rounds)):
+        rounds[i].reverse()
+    rounds.reverse() 
+
+    return rounds
+
+def extract_project_id(html: str) -> str:
+    match = re.search(
+        r"""["']?projectId["']?\s*:\s*["']?(\d+)""",
+        html,
+        re.S,
+    )
+    if match is None:
+        raise RuntimeError("projectId не найден в HTML-ответе.")
+    return match.group(1)
+
+def build_feed_url(project_id: str | int, feed_name: str) -> str:
+    base_url = FEED_BASE_URL_TEMPLATE.format(project_id=project_id)
+    return f"{base_url}/{feed_name}"
+
+def parse_league_toggle_key(html: str) -> str:
+    match = re.search(r'getToggleIcon\("([^"]+)"', html)
+    if not match:
+        raise RuntimeError("getToggleIcon league key не найден")
+
+    return match.group(1)
+
+INITIAL_FEED_RE = re.compile(
+    r"""cjs\.initialFeeds\[['\"](?P<name>[^'\"]+)['\"]\]\s*=\s*\{\s*data:\s*`(?P<data>[^`]*?)`\s*,\s*
+    allEventsCount\s*:\s*(?P<all_events_count>\d+)\s*,\s*
+    seasonId\s*:\s*(?P<season_id>\d+)\s*,\s*\}""",
+    re.S | re.X,
+)
+
 
 @dataclass(frozen=True)
 class Link:
@@ -148,15 +203,17 @@ class MatchInfo:
 
 class FlashscoreClient:
     RETRY_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+    BASE_URLS = {"it": "https://www.flashscore.it/",
+                 "kz": "https://www.flashscorekz.com/"}
 
     def __init__(
         self,
-        base_url: str = DEFAULT_BASE_URL,
+        lang: str = "it",
         timeout: float = 20.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
     ):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = self.BASE_URLS[lang].rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
@@ -171,6 +228,7 @@ class FlashscoreClient:
                 "Accept-Language": "en-US,en;q=0.9",
             }
         )
+        self.project_id = extract_project_id(self.fetch())
 
     def get(self, url: str, headers: dict[str, str] | None = None) -> requests.Response:
         last_exception: requests.RequestException | None = None
@@ -202,7 +260,7 @@ class FlashscoreClient:
             )
             time.sleep(delay)
 
-    def fetch(self, part_url: str) -> str:
+    def fetch(self, part_url: str = "") -> str:
         url = urljoin(self.base_url, part_url)
         response = self.get(url)
         return response.text
@@ -238,95 +296,132 @@ class FlashscoreClient:
             raise RuntimeError(f"Flashscore вернул JSON неожиданного типа для {url}")
         return data
 
-
-def normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def normalize_args(value: str) -> str:
-    normalized = normalize_text(value).casefold().replace("_", "-")
-    return normalized
-
-def get_odds(tag: BeautifulSoup) -> tuple[float, float]:
-    if (tag.get("title")):
-        parts = re.split(r"\s+»\s+", tag.get("title"))
-        return map(float, parts)
+class OddsParserIT:
+    def parse_odds(client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        payload = client.fetch_json(build_odds_api_url(match.event_id, client.project_id))
     
-    odd = float(tag.select_one("span").get_text(strip=True))
-    return (odd, odd)
+        apply_participant_market(
+            market_items(find_market(payload, "HOME_DRAW_AWAY")),
+            match,
+            lambda pair: setattr(info, "win1", pair),
+            lambda pair: setattr(info, "win2", pair),
+            lambda pair: setattr(info, "draw", pair),
+        )
 
-def extract_round_number(round_name: str) -> str:
-    match = re.search(r"\d+", round_name)
-    return match.group() if match else round_name
+        for item in market_items(find_market(payload, "OVER_UNDER")):
+            key = handicap_key(item)
+            if not key:
+                continue
+            if item.get("selection") == "OVER":
+                info.over[key] = odds_pair(item)
+            elif item.get("selection") == "UNDER":
+                info.under[key] = odds_pair(item)
 
-def tab_url(tabs: dict[str, Link], alias: str) -> str | None:
-    link = tabs.get(alias, None)
-    return link.url if link and link.url else None
+        for item in market_items(find_market(payload, "BOTH_TEAMS_TO_SCORE")):
+            if item.get("bothTeamsToScore") is True:
+                info.both_yes = odds_pair(item)
+            elif item.get("bothTeamsToScore") is False:
+                info.both_no = odds_pair(item)
 
-def parse_timestamp(value: str | None) -> str:
-    if not value:
-        return ""
-    try:
-        return datetime.fromtimestamp(int(value)).strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return value
+        apply_participant_market(
+            market_items(find_market(payload, "DOUBLE_CHANCE")),
+            match,
+            lambda pair: setattr(info, "double_1x", pair),
+            lambda pair: setattr(info, "double_x2", pair),
+            lambda pair: setattr(info, "double_12", pair),
+        )
 
-def get_correct_numbering(rounds: list[list[Match]]):
-    for i in range(len(rounds)):
-        rounds[i].reverse()
-    rounds.reverse() 
+        for item in market_items(find_market(payload, "ASIAN_HANDICAP")):
+            key = handicap_key(item)
+            if not key:
+                continue
+            if item.get("eventParticipantId") == match.team1_participant_id:
+                info.asian_1[key] = odds_pair(item)
+            elif item.get("eventParticipantId") == match.team2_participant_id:
+                info.asian_2[key] = odds_pair(item)
 
-    return rounds
+        for item in market_items(find_market(payload, "EUROPEAN_HANDICAP")):
+            key = handicap_key(item)
+            if not key:
+                continue
+            if item.get("eventParticipantId") == match.team1_participant_id:
+                info.european_1[key] = odds_pair(item)
+            elif item.get("eventParticipantId") == match.team2_participant_id:
+                info.european_2[key] = odds_pair(item)
+            elif item.get("eventParticipantId") is None:
+                info.european_x[key] = odds_pair(item)
 
-def extract_project_id(html: str) -> str:
-    match = re.search(
-        r"window\.leaguePageHeaderData\s*=\s*\{.*?\bprojectId\s*:\s*(\d+)",
-        html,
-        re.S,
-    )
-    if match is None:
-        raise RuntimeError("projectId не найден в leaguePageHeaderData.")
-    return match.group(1)
+        apply_participant_market(
+            market_items(find_market(payload, "DRAW_NO_BET")),
+            match,
+            lambda pair: setattr(info, "no_bet_1", pair),
+            lambda pair: setattr(info, "no_bet_2", pair),
+        )
 
-def extract_page_language(html: str) -> str:
-    soup = BeautifulSoup(html, "html.parser")
-    return soup.html.get("lang", "") if soup.html else ""
+        for item in market_items(find_market(payload, "CORRECT_SCORE")):
+            score = item.get("score")
+            if score:
+                info.correct[str(score)] = odds_pair(item)
 
+        for item in market_items(find_market(payload, "HALF_FULL_TIME")):
+            winner = item.get("winner")
+            if winner:
+                info.ht_ft[str(winner)] = odds_pair(item)
 
-def build_feed_url(project_id: str | int, feed_name: str) -> str:
-    base_url = FEED_BASE_URL_TEMPLATE.format(project_id=project_id)
-    return f"{base_url}/{feed_name}"
-
-INITIAL_FEED_RE = re.compile(
-    r"""cjs\.initialFeeds\[['\"](?P<name>[^'\"]+)['\"]\]\s*=\s*\{\s*data:\s*`(?P<data>[^`]*?)`\s*,\s*
-    allEventsCount\s*:\s*(?P<all_events_count>\d+)\s*,\s*
-    seasonId\s*:\s*(?P<season_id>\d+)\s*,\s*\}""",
-    re.S | re.X,
-)
+        for item in market_items(find_market(payload, "ODD_OR_EVEN")):
+            if item.get("selection") == "ODD":
+                info.odd = odds_pair(item)
+            elif item.get("selection") == "EVEN":
+                info.even = odds_pair(item)
 
 
-def parse_tabs_html(html: str) -> dict[str, Link]:
-    soup = BeautifulSoup(html, "html.parser")
-    group = soup.select_one(f"div.{LEAGUE_ALIAS['group']}")
-
-    if group is None:
-        return {}
-
-    tabs = {}
-    for node in group.select("a"):
-        alias = node.get("data-analytics-alias")
-        url = node.get("href")
-        text = node.get_text(strip=True)
-        tabs[f"{alias}"] = Link(text, url)
+    def parse_h2h(client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
+        h2h_url = build_feed_url(client.project_id, f"df_hh_1_{match.event_id}")
+        payload = client.fetch_feed(h2h_url)
+        
+        sections: dict[str, list[H2HMatch]] = {}
+        category_index = -1
+        section_index = 0
     
-    return tabs
+        for record in payload.split("¬~"):
+            fields = parse_feed_record(record)
+            if "KA" in fields:
+                category_index += 1
+                section_index = 0
+            if "KB" in fields:
+                section_index += 1
+    
+            if "KP" not in fields:
+                continue
+            
+            section_name = ""
+            if category_index == 0 and section_index == 3:
+                section_name = "h2h"
+            elif category_index == 1 and section_index == 1:
+                section_name = "home"
+            elif category_index == 2 and section_index == 1:
+                section_name = "away"
+    
+            if not section_name:
+                continue
+    
+            sections.setdefault(section_name, []).append(
+                H2HMatch(
+                    time=parse_timestamp(fields.get("KC")),
+                    team1=fields.get("KJ", "").lstrip("*"),
+                    team2=fields.get("KK", "").lstrip("*"),
+                    score1=int(fields.get("KU", "")),
+                    score2=int(fields.get("KT", "")),
+                    result=fields.get("WIS", ""),
+                )
+            )
 
-def parse_league_toggle_key(html: str) -> str:
-    match = re.search(r'getToggleIcon\("([^"]+)"', html)
-    if not match:
-        raise RuntimeError("getToggleIcon league key не найден")
+        info.h2h = sections
+        
 
-    return match.group(1)
+def create_odds_parser(lang: str):
+    if lang == "it":
+        return OddsParserIT
 
 def parse_initial_feed(html: str, name: str) -> dict[str, str]:
     feeds = {
@@ -482,127 +577,6 @@ def apply_participant_market(
         elif participant_id is None and draw_setter is not None:
             draw_setter(pair)
 
-def handle_odds_json(payload: dict[str, Any], match: Match, info: MatchInfo) -> MatchInfo:
-    apply_participant_market(
-        market_items(find_market(payload, "HOME_DRAW_AWAY")),
-        match,
-        lambda pair: setattr(info, "win1", pair),
-        lambda pair: setattr(info, "win2", pair),
-        lambda pair: setattr(info, "draw", pair),
-    )
-
-    for item in market_items(find_market(payload, "OVER_UNDER")):
-        key = handicap_key(item)
-        if not key:
-            continue
-        if item.get("selection") == "OVER":
-            info.over[key] = odds_pair(item)
-        elif item.get("selection") == "UNDER":
-            info.under[key] = odds_pair(item)
-
-    for item in market_items(find_market(payload, "BOTH_TEAMS_TO_SCORE")):
-        if item.get("bothTeamsToScore") is True:
-            info.both_yes = odds_pair(item)
-        elif item.get("bothTeamsToScore") is False:
-            info.both_no = odds_pair(item)
-
-    apply_participant_market(
-        market_items(find_market(payload, "DOUBLE_CHANCE")),
-        match,
-        lambda pair: setattr(info, "double_1x", pair),
-        lambda pair: setattr(info, "double_x2", pair),
-        lambda pair: setattr(info, "double_12", pair),
-    )
-
-    for item in market_items(find_market(payload, "ASIAN_HANDICAP")):
-        key = handicap_key(item)
-        if not key:
-            continue
-        if item.get("eventParticipantId") == match.team1_participant_id:
-            info.asian_1[key] = odds_pair(item)
-        elif item.get("eventParticipantId") == match.team2_participant_id:
-            info.asian_2[key] = odds_pair(item)
-
-    for item in market_items(find_market(payload, "EUROPEAN_HANDICAP")):
-        key = handicap_key(item)
-        if not key:
-            continue
-        if item.get("eventParticipantId") == match.team1_participant_id:
-            info.european_1[key] = odds_pair(item)
-        elif item.get("eventParticipantId") == match.team2_participant_id:
-            info.european_2[key] = odds_pair(item)
-        elif item.get("eventParticipantId") is None:
-            info.european_x[key] = odds_pair(item)
-
-    apply_participant_market(
-        market_items(find_market(payload, "DRAW_NO_BET")),
-        match,
-        lambda pair: setattr(info, "no_bet_1", pair),
-        lambda pair: setattr(info, "no_bet_2", pair),
-    )
-
-    for item in market_items(find_market(payload, "CORRECT_SCORE")):
-        score = item.get("score")
-        if score:
-            info.correct[str(score)] = odds_pair(item)
-
-    for item in market_items(find_market(payload, "HALF_FULL_TIME")):
-        winner = item.get("winner")
-        if winner:
-            info.ht_ft[str(winner)] = odds_pair(item)
-
-    for item in market_items(find_market(payload, "ODD_OR_EVEN")):
-        if item.get("selection") == "ODD":
-            info.odd = odds_pair(item)
-        elif item.get("selection") == "EVEN":
-            info.even = odds_pair(item)
-
-    return info
-
-def parse_h2h_feed(payload: str) -> dict[str, list[H2HMatch]]:
-    sections: dict[str, list[H2HMatch]] = {}
-    category_index = -1
-    section_index = 0
-
-    for record in payload.split("¬~"):
-        fields = parse_feed_record(record)
-        if "KA" in fields:
-            category_index += 1
-            section_index = 0
-        if "KB" in fields:
-            section_index += 1
-
-        if "KP" not in fields:
-            continue
-        
-        section_name = ""
-        if category_index == 0 and section_index == 3:
-            section_name = "h2h"
-        elif category_index == 1 and section_index == 1:
-            section_name = "home"
-        elif category_index == 2 and section_index == 1:
-            section_name = "away"
-
-        if not section_name:
-            continue
-
-        sections.setdefault(section_name, []).append(
-            H2HMatch(
-                time=parse_timestamp(fields.get("KC")),
-                team1=fields.get("KJ", "").lstrip("*"),
-                team2=fields.get("KK", "").lstrip("*"),
-                score1=int(fields.get("KU", "")),
-                score2=int(fields.get("KT", "")),
-                result=fields.get("WIS", ""),
-            )
-        )
-
-    return sections
-
-def handle_h2h(payload: str, info: MatchInfo) -> MatchInfo:
-    info.h2h = parse_h2h_feed(payload)
-    return info
-
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Консольный парсер чемпионатов Flashscore с выгрузкой в xlsx по шаблону."
@@ -619,7 +593,7 @@ def build_sheet_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sport", default="football")
     parser.add_argument("--country", required=True)
     parser.add_argument("--league", required=True)
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--lang", choices=("it", "kz"), default="it")
     parser.add_argument("--mode", choices=("results", "fixtures", "full"), default="full")
     parser.add_argument("--sheet", required=True)
     return parser
@@ -636,11 +610,11 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     sport = normalize_args(sheet_args.sport)
     country = normalize_args(sheet_args.country)
     league = normalize_args(sheet_args.league)
-    client = FlashscoreClient(base_url=sheet_args.base_url, timeout=timeout)
+    client = FlashscoreClient(lang=sheet_args.lang, timeout=timeout)
+    odds_parser = create_odds_parser(sheet_args.lang)
 
     url = f"/{sport}/{country}/{league}"
     league_html = client.fetch(url)
-    project_id = extract_project_id(league_html)
 
     result_rounds = parse_results_rounds(client, league_html)
     fixture_rounds = parse_fixtures_rounds(league_html)
@@ -668,14 +642,11 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 )
                 cnt += 1
 
-                odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
-                handle_odds_json(odds_payload, match, info)
+                odds_parser.parse_odds(client, match, info)
                 if delay > 0:
                     time.sleep(delay)
 
-                h2h_url = build_feed_url(project_id, f"df_hh_1_{match.event_id}")
-                h2h_payload = client.fetch_feed(h2h_url)
-                handle_h2h(h2h_payload, info)
+                odds_parser.parse_h2h(client, match, info)
 
                 matches_info.append(info)
                 print(
@@ -698,16 +669,13 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 )
                 cnt += 1
 
-                odds_payload = client.fetch_json(build_odds_api_url(match.event_id, project_id))
-                handle_odds_json(odds_payload, match, info)
+                odds_parser.parse_odds(client, match, info)
                 if not all(pair[0] > 0 and pair[1] > 0 for pair in (info.win1, info.draw, info.win2)):
                     return matches_info
                 if delay > 0:
                     time.sleep(delay)
 
-                h2h_url = build_feed_url(project_id, f"df_hh_1_{match.event_id}")
-                h2h_payload = client.fetch_feed(h2h_url)
-                handle_h2h(h2h_payload, info)
+                odds_parser.parse_h2h(client, match, info)
 
                 matches_info.append(info)
                 print(
