@@ -64,26 +64,26 @@ python run.py --template template.xlsm --output report.xlsm --delay 0.3
 | Группа | Примеры |
 | --- | --- |
 | Матч | `{number}`, `{round}`, `{time}`, `{team1}`, `{team2}`, `{score1}`, `{score2}`, `{score}` |
-| Исход `1-X-2` | `{win1:prev}`, `{draw:final}`, `{win2:final}`, `{favorite:final}`, `{outsider:final}` |
-| Тоталы и форы | `{over:2.5;final}`, `{under:2.5;prev}`, `{asian-1:-0.5;final}`, `{european-x:1;final}` |
-| Другие рынки | `{both-yes:final}`, `{double-1x:final}`, `{no-bet-1:final}`, `{correct:1:0;final}`, `{odd:final}` |
+| Исход `1-X-2` | `{win1-prev}`, `{draw-final}`, `{win2-final}`, `{favorite-final}`, `{outsider-final}` |
+| Тоталы и форы | `{over:2.5-final}`, `{under:2.5-prev}`, `{asian-1:-0.5-final}`, `{european-x:1-final}` |
+| Другие рынки | `{both-yes-final}`, `{double-1x-final}`, `{no-bet-1-final}`, `{correct:1:0-final}`, `{odd-final}` |
 | H2H | `{home:1;team1}`, `{away:2;score}`, `{h2h:3;result}` |
-| Повтор | `{repeat:win1:final}` - порядковый номер одинакового значения коэффициента в столбце. |
+| Повтор | `{repeat:win1-final}` - порядковый номер одинакового значения коэффициента в столбце. |
 
-`prev` означает коэффициент открытия, `final` - текущий коэффициент. Если данных нет, вместо плейсхолдера будет пустая строка.
+`prev` и `final` являются частью имени плейсхолдера: `prev` означает коэффициент открытия, `final` - текущий коэффициент. Если данных нет, вместо плейсхолдера будет пустая строка.
 
 ### Условное форматирование
 
 После обычного атрибута можно указать выбор ячейки-образца для шрифта и заливки:
 
 ```text
-{win1:final; {win1:final} < 2 ? A1 : B1}
+{win1-final; {win1-final} < 2 ? A1 : B1}
 ```
 
 Если условие истинно, плейсхолдер получит форматирование из `A1`, иначе - из `B1`. Для нескольких веток:
 
 ```text
-{both-yes:final; {score1} in (None, "") ? A1 : {both-yes:final} < 2 ? B1 : C1}
+{both-yes-final; {score1} in (None, "") ? A1 : {both-yes-final} < 2 ? B1 : C1}
 ```
 
 Условия используют синтаксис Python. Вложенные ветки вычисляются слева направо: после первого истинного условия следующие не вычисляются.

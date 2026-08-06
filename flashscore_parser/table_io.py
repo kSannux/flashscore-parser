@@ -37,13 +37,6 @@ class XlsxTemplate:
     header_row: int
     template_start_row: int
 
-@dataclass
-class Attributes:
-    is_final: bool
-    odds: tuple[float, float]
-    rules: str
-
-
 @dataclass(frozen=True)
 class RenderedArrayFormula:
     formula: str
@@ -112,24 +105,6 @@ def is_special_name(name: str) -> bool:
         return True
     return False
         
-def is_dict_attr(name: str, attr: str):
-    if name in {"over", "under", "asian-1", "asian-2", "european-1", "european-x", "european-2"}:
-        return True if float(attr) % 0.25 == 0 else False 
-    elif name == "correct":
-        scores = attr.split(':')
-        try:
-            map(int, scores)
-            return True
-        except:
-            return False
-    elif name == "ht-ft":
-        ht_ft = attr.split("/")
-        if (isinstance(ht_ft[0], int) or ht_ft[0] == 'X') and \
-            (isinstance(ht_ft[1], int) or ht_ft[1] == 'X'):
-            return True
-        else:
-            return False
-
 def is_format_attr(attr: str) -> re.Match[str] | None:
     return FORMAT_ATTR_RE.fullmatch(attr)
 
@@ -234,13 +209,6 @@ def resolve_format_cell(attr: str, values: dict[str, Any], worksheet: Worksheet)
 def resolve_format_attr(attr: str, values: dict[str, Any], worksheet: Worksheet) -> InlineFont:
     return font_to_inline(resolve_format_cell(attr, values, worksheet).font)
         
-def is_odds_name(name: str, container: Any):
-    if isinstance(container, tuple) and name in {"win1", "win2", "draw", "favorite", "outsider", "over", 
-                                                 "under", "both-yes", "both-no", "double-1x", "double-12", 
-                                                 "double-x2", "no-bet-1", "no-bet-2", "odd", "even"}:
-        return True
-    return False
-
 def is_h2h_name(name: str):
     if name in {"home", "away", "h2h"}:
         return True
@@ -268,42 +236,16 @@ def resolve_placeholder(values: dict[str, Any], placeholder: str) -> Any:
 
     container = values.get(name)
     if isinstance(container, dict):
-        attributes = Attributes(is_final=True, odds=(), rules="")
-        split_attr = split_attrs(attrs)
-
-        for attr in split_attr:
-            if attr == "prev":
-                attributes.is_final = False
-            elif attr == "final":
-                continue
-            elif is_dict_attr(name, attr):
-                attributes.odds = container.get(attr, tuple())
-            else:
-                return ""        
-        if len(attributes.odds) < 2 or attributes.odds == (0.0, 0.0):
+        odds_key, state = attrs.rsplit("-", 1) if "-" in attrs else ("", "")
+        if state not in {"prev", "final"}:
             return ""
-        if attributes.is_final:
-            return attributes.odds[1]
-        else:
-            return attributes.odds[0]
-            
-    if is_odds_name(name, container):
-        attributes = Attributes(is_final=True, odds=(), rules="")
-        split_attr = split_attrs(attrs)
 
-        for attr in split_attr:
-            if attr == "prev":
-                attributes.is_final = False
-            elif attr == "final":
-                continue
-            else:
-                return ""
-        if len(container) < 2 or tuple(container) == (0.0, 0.0):
+        odds = container.get(odds_key)
+        if not isinstance(odds, (tuple, list)) or len(odds) < 2:
             return ""
-        if attributes.is_final:
-            return container[1]
-        else:
-            return container[0]
+        if tuple(odds) == (0.0, 0.0):
+            return ""
+        return odds[0] if state == "prev" else odds[1]
     
     if is_h2h_name(name):
         split_attr = split_attrs(attrs)

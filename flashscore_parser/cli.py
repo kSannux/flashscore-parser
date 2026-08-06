@@ -280,7 +280,7 @@ class MatchInfo:
     h2h: dict[str, list[H2HMatch]] = field(default_factory=dict)
 
     def as_placeholder_row(self) -> dict[str, object]:
-        return {
+        values: dict[str, object] = {
             "number": self.number,
             "round": self.round,
             "time": self.time,
@@ -289,35 +289,66 @@ class MatchInfo:
             "score1": self.score1,
             "score2": self.score2,
             "score": f"{self.score1}:{self.score2}",
-            "win1": self.win1,
-            "win2": self.win2,
-            "draw": self.draw,
-            "favorite": self.win1 if self.win1 <= self.win2 else self.win2,
-            "outsider": self.win1 if self.win1 > self.win2 else self.win2,
-            "over": self.over,
-            "under": self.under,
-            "both-yes": self.both_yes,
-            "both-no": self.both_no,
-            "double-1x": self.double_1x,
-            "double-12": self.double_12,
-            "double-x2": self.double_x2,
-            "asian-1": self.asian_1,
-            "asian-2": self.asian_2,
-            "favorite-asian": self.asian_1 if self.win1 > self.win2 else self.asian_2,
-            "outsider-asian": self.asian_2 if self.win1 > self.win2 else self.asian_1,
-            "european-1": self.european_1,
-            "european-x": self.european_x,
-            "european-2": self.european_2,
-            "no-bet-1": self.no_bet_1,
-            "no-bet-2": self.no_bet_2,
-            "correct": self.correct,
-            "ht-ft": self.ht_ft,
-            "odd": self.odd,
-            "even": self.even,
+            "win1-prev": self.win1[0],
+            "win1-final": self.win1[1],
+            "win2-prev": self.win2[0],
+            "win2-final": self.win2[1],
+            "draw-prev": self.draw[0],
+            "draw-final": self.draw[1],
+            "favorite-prev": self.win1[0] if self.win1[0] <= self.win2[0] else self.win2[0],
+            "favorite-final": self.win1[1] if self.win1[0] <= self.win2[0] else self.win2[1],
+            "outsider-prev": self.win1[0] if self.win1[0] > self.win2[0] else self.win2[0],
+            "outsider-final": self.win1[1] if self.win1[0] > self.win2[0] else self.win2[1],
+            "both-yes-prev": self.both_yes[0],
+            "both-yes-final": self.both_yes[1],
+            "both-no-prev": self.both_no[0],
+            "both-no-final": self.both_no[1],
+            "double-1x-prev": self.double_1x[0],
+            "double-1x-final": self.double_1x[1],
+            "double-12-prev": self.double_12[0],
+            "double-12-final": self.double_12[1],
+            "double-x2-prev": self.double_x2[0],
+            "double-x2-final": self.double_x2[1],
+            "no-bet-1-prev": self.no_bet_1[0],
+            "no-bet-1-final": self.no_bet_1[1],
+            "no-bet-2-prev": self.no_bet_2[0],
+            "no-bet-2-final": self.no_bet_2[1],
+            "odd-prev": self.odd[0],
+            "odd-final": self.odd[1],
+            "even-prev": self.even[0],
+            "even-final": self.even[1],
             "home": self.h2h["home"],
             "away": self.h2h["away"],
-            "h2h": self.h2h["h2h"] 
+            "h2h": self.h2h["h2h"],
         }
+
+        def add_pair(name: str, pair: tuple[float, float]) -> None:
+            values[f"{name}-prev"] = pair[0]
+            values[f"{name}-final"] = pair[1]
+
+        def add_market(name: str, market: dict[str, tuple[float, float]]) -> None:
+            for line, pair in market.items():
+                add_pair(f"{name}:{line}", pair)
+
+        favorite_asian = self.asian_1 if self.win1[0] <= self.win2[0] else self.asian_2
+        outsider_asian = self.asian_2 if self.win1[0] > self.win2[0] else self.asian_1
+        add_market("favorite-asian", favorite_asian)
+        add_market("outsider-asian", outsider_asian)
+
+        for name, market in (
+            ("over", self.over),
+            ("under", self.under),
+            ("asian-1", self.asian_1),
+            ("asian-2", self.asian_2),
+            ("european-1", self.european_1),
+            ("european-x", self.european_x),
+            ("european-2", self.european_2),
+            ("correct", self.correct),
+            ("ht-ft", self.ht_ft),
+        ):
+            add_market(name, market)
+
+        return values
 
 
 class FlashscoreClient:
