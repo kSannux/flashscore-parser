@@ -331,7 +331,7 @@ class MatchInfo:
                 add_pair(f"{name}:{line}", pair)
 
         favorite_asian = self.asian_1 if self.win1[0] <= self.win2[0] else self.asian_2
-        outsider_asian = self.asian_2 if self.win1[0] > self.win2[0] else self.asian_1
+        outsider_asian = self.asian_1 if self.win1[0] > self.win2[0] else self.asian_2
         add_market("favorite-asian", favorite_asian)
         add_market("outsider-asian", outsider_asian)
 
