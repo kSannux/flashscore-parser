@@ -141,6 +141,30 @@ def parse_feed_record(record: str) -> dict[str, str]:
         fields[key] = value.replace("\\/", "/")
     return fields
 
+def parse_two_halves_score(data: str) -> tuple[int, int] | None:
+    half_scores: list[tuple[int, int]] = []
+
+    for record in data.split("¬~"):
+        fields = parse_feed_record(record)
+        if "AC" not in fields:
+            continue
+
+        try:
+            half_scores.append((int(fields["IG"]), int(fields["IH"])))
+        except (KeyError, ValueError):
+            continue
+
+        if len(half_scores) == 2:
+            break
+
+    if len(half_scores) != 2:
+        return None
+
+    return (
+        half_scores[0][0] + half_scores[1][0],
+        half_scores[0][1] + half_scores[1][1],
+    )
+
 def parse_matches_feed(data: str) -> list[list[Match]]:
     rounds: list[list[Match]] = []
     round_indexes: dict[str, int] = {}
@@ -256,6 +280,7 @@ class Match:
 
 @dataclass(frozen=True)
 class H2HMatch:
+    event_id: str
     time: str
     team1: str
     team2: str
@@ -475,6 +500,9 @@ class FlashscoreClient:
         return data
 
 class OddsParser(ABC):
+    def __init__(self) -> None:
+        self._two_halves_score_cache: dict[str, tuple[int, int] | None] = {}
+
     @abstractmethod
     def parse_odds(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
         """Заполняет коэффициенты матча."""
@@ -482,6 +510,19 @@ class OddsParser(ABC):
     @abstractmethod
     def parse_h2h(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
         """Заполняет историю очных встреч матча."""
+
+    def _two_halves_score(
+        self,
+        client: FlashscoreClient,
+        event_id: str,
+    ) -> tuple[int, int] | None:
+        if not event_id:
+            return None
+        if event_id not in self._two_halves_score_cache:
+            score_url = build_feed_url(client.project_id, f"df_sui_1_{event_id}")
+            payload = client.fetch_feed(score_url)
+            self._two_halves_score_cache[event_id] = parse_two_halves_score(payload)
+        return self._two_halves_score_cache[event_id]
 
     def _parse_h2h(self, client: FlashscoreClient, match: Match, info: MatchInfo) -> None:
         h2h_url = build_feed_url(client.project_id, f"df_hh_1_{match.event_id}")
@@ -503,7 +544,7 @@ class OddsParser(ABC):
                 continue
 
             section_name = ""
-            if category_index == 0 and section_index == 3:
+            if category_index == 1 and section_index == 2:
                 section_name = "h2h"
             elif category_index == 1 and section_index == 1:
                 section_name = "home"
@@ -513,13 +554,19 @@ class OddsParser(ABC):
             if not section_name:
                 continue
 
+            event_id = fields.get("KP", "")
+            score = (int(fields.get("KU", "")), int(fields.get("KT", "")))
+            if any(fields.get(name) for name in ("KM", "RPA", "RPB")):
+                score = self._two_halves_score(client, event_id) or score
+
             sections.setdefault(section_name, []).append(
                 H2HMatch(
+                    event_id=event_id,
                     time=parse_timestamp(fields.get("KC")),
                     team1=fields.get("KJ", "").lstrip("*"),
                     team2=fields.get("KK", "").lstrip("*"),
-                    score1=int(fields.get("KU", "")),
-                    score2=int(fields.get("KT", "")),
+                    score1=score[0],
+                    score2=score[1],
                     result=fields.get("WIS", ""),
                 )
             )
