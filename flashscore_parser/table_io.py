@@ -41,7 +41,6 @@ NUMERIC_ODDS_NAMES = {
     "european-x",
     "european-2",
 }
-H2H_FIELDS = {"time", "team1", "team2", "score1", "score2", "score", "result"}
 
 @dataclass(frozen=True)
 class XlsxTemplate:
@@ -274,20 +273,18 @@ def resolve_placeholder(values: dict[str, Any], placeholder: str) -> Any:
     
     if is_h2h_name(name):
         split_attr = split_attrs(attrs)
-        if (
-            len(split_attr) != 2
-            or not split_attr[0].isdigit()
-            or int(split_attr[0]) < 1
-            or split_attr[1] not in H2H_FIELDS
-        ):
-            return ""
+        index = 0
+        field = ""
 
-        index = int(split_attr[0]) - 1
-        field = split_attr[1]
-        container = values.get(name)
-        if not isinstance(container, list) or index >= len(container):
-            return "-"
-        return container[index].as_placeholder().get(field, "")
+        for attr in split_attr:
+            if attr.isdigit():
+                index = int(attr)
+            else:
+                field = attr
+
+        container = values.get(name, [])
+        h2h_dict = container[index - 1].as_placeholder() if index <= len(container) else {field: "-"}
+        return h2h_dict.get(field, "")
 
     return ""
 
