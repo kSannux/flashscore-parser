@@ -36,6 +36,7 @@ python run.py --template template.xlsm --output report.xlsm --delay 0.3
 
 ```text
 --sport calcio --country cina --league supercoppa --lang it --mode full --sheet "China Super Cup"
+--sport calcio --country cina --league supercoppa --lang it --mode full --rounds 1-5 --sheet "China Super Cup"
 ```
 
 Аргументы в ячейке:
@@ -47,6 +48,7 @@ python run.py --template template.xlsm --output report.xlsm --delay 0.3
 | `--league` | Обязательный slug лиги из URL, например `bundesliga` или `supercoppa`. |
 | `--lang` | Источник данных: `it` - Flashscore Italy, значение по умолчанию; `kz` - Flashscore Kazakhstan. |
 | `--mode` | `results` - сыгранные матчи; `fixtures` - будущие; `full` - оба типа, значение по умолчанию. |
+| `--rounds` | Выбранные туры: `1`, `1,3,5` или диапазон `1-5`. Если не указан, обрабатываются все туры. |
 | `--sheet` | Обязательное итоговое имя листа. Если есть пробелы, заключите имя в кавычки. |
 
 Например, два листа с именами `A1` и `Z1` позволят заполнить две лиги за один запуск. Для будущих матчей программа останавливает загрузку, когда не находит основные коэффициенты `1-X-2`.

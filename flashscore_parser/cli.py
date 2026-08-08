@@ -29,6 +29,34 @@ def normalize_args(value: str) -> str:
     normalized = normalize_text(value).casefold().replace("_", "-")
     return normalized
 
+def parse_rounds(value: str) -> set[int]:
+    rounds: set[int] = set()
+
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            raise argparse.ArgumentTypeError("номер тура не может быть пустым")
+
+        if "-" in item:
+            bounds = [bound.strip() for bound in item.split("-")]
+            if len(bounds) != 2 or not all(bound.isdigit() for bound in bounds):
+                raise argparse.ArgumentTypeError(
+                    f"некорректный диапазон туров: '{item}'"
+                )
+            first, last = map(int, bounds)
+            if first < 1 or last < first:
+                raise argparse.ArgumentTypeError(
+                    f"некорректный диапазон туров: '{item}'"
+                )
+            rounds.update(range(first, last + 1))
+            continue
+
+        if not item.isdigit() or int(item) < 1:
+            raise argparse.ArgumentTypeError(f"некорректный номер тура: '{item}'")
+        rounds.add(int(item))
+
+    return rounds
+
 def get_odds(tag: BeautifulSoup) -> tuple[float, float]:
     if (tag.get("title")):
         parts = re.split(r"\s+»\s+", tag.get("title"))
@@ -698,6 +726,11 @@ def build_sheet_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--league", required=True)
     parser.add_argument("--lang", choices=("it", "kz"), default="it")
     parser.add_argument("--mode", choices=("results", "fixtures", "full"), default="full")
+    parser.add_argument(
+        "--rounds",
+        type=parse_rounds,
+        help="Номера туров: 1, 1,3,5 или 1-5.",
+    )
     parser.add_argument("--sheet", required=True)
     return parser
 
@@ -731,9 +764,16 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     matches_info: list[MatchInfo] = []
     cnt = 1
 
-    if sheet_args.mode in {"results", "full"}:
+    def selected_round(match: Match) -> bool:
+        if sheet_args.rounds is None:
+            return True
+        return match.round.isdigit() and int(match.round) in sheet_args.rounds
+
+    if sheet_args.mode in ("results", "full"):
         for round_matches in result_rounds:
             for match in round_matches:
+                if not selected_round(match):
+                    continue
                 info = MatchInfo(
                     number=cnt,
                     round=match.round,
@@ -758,9 +798,11 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                     f"{info.team1} {info.score1}:{info.score2} {info.team2}"
                 )
 
-    if sheet_args.mode in {"fixtures", "full"}:
+    if sheet_args.mode in ("fixtures", "full"):
         for round_matches in fixture_rounds:
             for match in round_matches:
+                if not selected_round(match):
+                    continue
                 info = MatchInfo(
                     number=cnt,
                     round=match.round,
