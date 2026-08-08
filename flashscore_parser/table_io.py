@@ -4,6 +4,7 @@ import json
 import re
 from copy import copy
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from shutil import copy2
 from typing import Any
@@ -28,6 +29,19 @@ FORMAT_RULE_RE = re.compile(
     rf"(?P<cell>{CELL_REF})\s*:\s*(?P<remaining>.+)$"
 )
 CELL_REF_RE = re.compile(rf"^{CELL_REF}$")
+MISSING_PLACEHOLDER_VALUE = 0
+NUMERIC_ODDS_NAMES = {
+    "over",
+    "under",
+    "asian-1",
+    "asian-2",
+    "favorite-asian",
+    "outsider-asian",
+    "european-1",
+    "european-x",
+    "european-2",
+}
+H2H_FIELDS = {"time", "team1", "team2", "score1", "score2", "score", "result"}
 
 @dataclass(frozen=True)
 class XlsxTemplate:
@@ -214,14 +228,33 @@ def is_h2h_name(name: str):
         return True
     return False
 
+def is_valid_odds_parameter(name: str, parameter: str) -> bool:
+    if name in NUMERIC_ODDS_NAMES:
+        try:
+            value = Decimal(parameter)
+        except InvalidOperation:
+            return False
+        return value.is_finite() and value % Decimal("0.25") == 0
+    if name == "correct":
+        return re.fullmatch(r"\d+:\d+", parameter) is not None
+    if name == "ht-ft":
+        return re.fullmatch(r"[12X]/[12X]", parameter) is not None
+    return False
+
+def is_valid_missing_odds_placeholder(name: str, attrs: str) -> bool:
+    if "-" not in attrs:
+        return False
+    parameter, state = attrs.rsplit("-", 1)
+    return state in {"prev", "final"} and is_valid_odds_parameter(name, parameter)
+
 def resolve_placeholder(values: dict[str, Any], placeholder: str) -> Any:
     key = placeholder.strip()
     if key in values:
         value = values[key]
         if isinstance(value, dict) and not value:
-            return ""
+            return MISSING_PLACEHOLDER_VALUE
         if isinstance(value, (list, tuple)) and tuple(value) == (0.0, 0.0):
-            return ""
+            return MISSING_PLACEHOLDER_VALUE
         return value
 
     if ":" not in key:
@@ -230,36 +263,31 @@ def resolve_placeholder(values: dict[str, Any], placeholder: str) -> Any:
     name, attrs = key.split(":", 1)
     if is_special_name(name):
         odd = resolve_placeholder(values, attrs)
+        if odd == "":
+            return ""
         repeat_values = values["repeat"].setdefault(key, {})
         repeat_values[odd] = repeat_values.get(odd, 0) + 1
         return repeat_values[odd]
 
-    container = values.get(name)
-    if isinstance(container, dict):
-        odds_key, state = attrs.rsplit("-", 1) if "-" in attrs else ("", "")
-        if state not in {"prev", "final"}:
-            return ""
-
-        odds = container.get(odds_key)
-        if not isinstance(odds, (tuple, list)) or len(odds) < 2:
-            return ""
-        if tuple(odds) == (0.0, 0.0):
-            return ""
-        return odds[0] if state == "prev" else odds[1]
+    if is_valid_missing_odds_placeholder(name, attrs):
+        return MISSING_PLACEHOLDER_VALUE
     
     if is_h2h_name(name):
         split_attr = split_attrs(attrs)
-        i = 0
-        field = ""
+        if (
+            len(split_attr) != 2
+            or not split_attr[0].isdigit()
+            or int(split_attr[0]) < 1
+            or split_attr[1] not in H2H_FIELDS
+        ):
+            return ""
 
-        for attr in split_attr:
-            if attr.isdigit():
-                i = int(attr)
-            else:
-                field = attr
-        
-        h2h_dict = container[i-1].as_placeholder() if i <= len(container) else {field: "-"}
-        return h2h_dict.get(field, "")
+        index = int(split_attr[0]) - 1
+        field = split_attr[1]
+        container = values.get(name)
+        if not isinstance(container, list) or index >= len(container):
+            return "-"
+        return container[index].as_placeholder().get(field, "")
 
     return ""
 
