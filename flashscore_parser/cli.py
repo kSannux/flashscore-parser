@@ -299,6 +299,15 @@ class H2HMatch:
             "result": self.result
         }
 
+def h2h_matches_after_event(
+    matches: list[H2HMatch],
+    event_id: str,
+) -> list[H2HMatch]:
+    for index, h2h_match in enumerate(matches):
+        if h2h_match.event_id == event_id:
+            return matches[index + 1:]
+    return matches
+
 
 @dataclass
 class MatchInfo:
@@ -571,7 +580,10 @@ class OddsParser(ABC):
                 )
             )
 
-        info.h2h = sections
+        info.h2h = {
+            name: h2h_matches_after_event(section_matches, match.event_id)
+            for name, section_matches in sections.items()
+        }
 
 
 class OddsParserIT(OddsParser):
