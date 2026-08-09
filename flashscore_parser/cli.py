@@ -30,10 +30,39 @@ def normalize_args(value: str) -> str:
     normalized = normalize_text(value).casefold().replace("_", "-")
     return normalized
 
-def parse_rounds(value: str) -> set[int]:
+@dataclass(frozen=True)
+class RoundSelection:
+    mode: str
+    numbers: frozenset[int] | None = None
+
+
+def parse_rounds(value: str) -> RoundSelection:
+    mode_aliases = {
+        "result": "results",
+        "results": "results",
+        "fixture": "fixtures",
+        "fixtures": "fixtures",
+        "full": "full",
+    }
+    value = value.strip().casefold()
+    if value in mode_aliases:
+        return RoundSelection(mode_aliases[value])
+
+    mode = "full"
+    rounds_value = value
+    if ":" in value:
+        mode_value, rounds_value = value.split(":", 1)
+        mode = mode_aliases.get(mode_value, "")
+        if not mode:
+            raise argparse.ArgumentTypeError(
+                f"некорректный режим туров: '{mode_value}'"
+            )
+        if not rounds_value:
+            raise argparse.ArgumentTypeError("после режима не указаны номера туров")
+
     rounds: set[int] = set()
 
-    for item in value.split(","):
+    for item in rounds_value.split(","):
         item = item.strip()
         if not item:
             raise argparse.ArgumentTypeError("номер тура не может быть пустым")
@@ -56,7 +85,7 @@ def parse_rounds(value: str) -> set[int]:
             raise argparse.ArgumentTypeError(f"некорректный номер тура: '{item}'")
         rounds.add(int(item))
 
-    return rounds
+    return RoundSelection(mode, frozenset(rounds))
 
 def get_odds(tag: BeautifulSoup) -> tuple[float, float]:
     if (tag.get("title")):
@@ -795,11 +824,14 @@ def build_sheet_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--country", required=True)
     parser.add_argument("--league", required=True)
     parser.add_argument("--lang", choices=("it", "kz"), default="it")
-    parser.add_argument("--mode", choices=("results", "fixtures", "full"), default="full")
     parser.add_argument(
         "--rounds",
         type=parse_rounds,
-        help="Номера туров: 1, 1,3,5 или 1-5.",
+        default=RoundSelection("full"),
+        help=(
+            "Источник и туры: results, fixtures, full, 1-5 "
+            "или results:1,3-5."
+        ),
     )
     parser.add_argument("--sheet", required=True)
     return parser
@@ -822,22 +854,29 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     url = f"/{sport}/{country}/{league}"
     league_html = client.fetch(url)
 
-    result_rounds = parse_results_rounds(client, league_html)
-    fixture_rounds = parse_fixtures_rounds(league_html)
-    total_matches = sum(len(round_matches) for round_matches in result_rounds)
-    if not result_rounds or total_matches == 0:
-        raise RuntimeError(
-            f"На странице результатов не найдено матчей: {url}/results. "
-            "Проверьте предыдущие сезоны в archive и укажите в --league"
-        )
+    round_selection: RoundSelection = sheet_args.rounds
+    result_rounds: list[list[Match]] = []
+    fixture_rounds: list[list[Match]] = []
+
+    if round_selection.mode in ("results", "full"):
+        result_rounds = parse_results_rounds(client, league_html)
+        total_matches = sum(len(round_matches) for round_matches in result_rounds)
+        if not result_rounds or total_matches == 0:
+            raise RuntimeError(
+                f"На странице результатов не найдено матчей: {url}/results. "
+                "Проверьте предыдущие сезоны в archive и укажите в --league"
+            )
+
+    if round_selection.mode in ("fixtures", "full"):
+        fixture_rounds = parse_fixtures_rounds(league_html)
 
     matches_info: list[MatchInfo] = []
     cnt = 1
 
     def selected_round(match: Match) -> bool:
-        if sheet_args.rounds is None:
+        if round_selection.numbers is None:
             return True
-        return match.round.isdigit() and int(match.round) in sheet_args.rounds
+        return match.round.isdigit() and int(match.round) in round_selection.numbers
 
     def parse_match_odds(match: Match, info: MatchInfo) -> bool:
         parsed_info = deepcopy(info)
@@ -865,7 +904,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 f"не загружен: {exc}"
             )
 
-    if sheet_args.mode in ("results", "full"):
+    if round_selection.mode in ("results", "full"):
         for round_matches in result_rounds:
             for match in round_matches:
                 if not selected_round(match):
@@ -891,7 +930,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                     f"{info.team1} {info.score1}:{info.score2} {info.team2}"
                 )
 
-    if sheet_args.mode in ("fixtures", "full"):
+    if round_selection.mode in ("fixtures", "full"):
         for round_matches in fixture_rounds:
             for match in round_matches:
                 if not selected_round(match):

@@ -35,8 +35,8 @@ python run.py --template template.xlsm --output report.xlsm --delay 0.3
 Пример: лист называется `A1`, а ячейка `A1` содержит:
 
 ```text
---sport calcio --country cina --league supercoppa --lang it --mode full --sheet "China Super Cup"
---sport calcio --country cina --league supercoppa --lang it --mode full --rounds 1-5 --sheet "China Super Cup"
+--sport calcio --country cina --league supercoppa --lang it --rounds full --sheet "China Super Cup"
+--sport calcio --country cina --league supercoppa --lang it --rounds results:1-5 --sheet "China Super Cup"
 ```
 
 Аргументы в ячейке:
@@ -47,8 +47,7 @@ python run.py --template template.xlsm --output report.xlsm --delay 0.3
 | `--country` | Обязательный slug страны из URL, например `germany` или `cina`. |
 | `--league` | Обязательный slug лиги из URL, например `bundesliga` или `supercoppa`. |
 | `--lang` | Источник данных: `it` - Flashscore Italy, значение по умолчанию; `kz` - Flashscore Kazakhstan. |
-| `--mode` | `results` - сыгранные матчи; `fixtures` - будущие; `full` - оба типа, значение по умолчанию. |
-| `--rounds` | Выбранные туры: `1`, `1,3,5` или диапазон `1-5`. Если не указан, обрабатываются все туры. |
+| `--rounds` | Источник матчей и туры: `results`, `fixtures` или `full` (по умолчанию). Можно указать номера: `1`, `1,3,5`, `1-5` либо совместить режим и номера: `results:1-5`, `fixtures:3,5`. Числа без режима относятся к `full`. |
 | `--sheet` | Обязательное итоговое имя листа. Если есть пробелы, заключите имя в кавычки. |
 
 Например, два листа с именами `A1` и `Z1` позволят заполнить две лиги за один запуск. Для будущих матчей программа останавливает загрузку, когда не находит основные коэффициенты `1-X-2`.
