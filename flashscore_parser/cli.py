@@ -8,6 +8,7 @@ import sys
 import time
 import time
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -838,6 +839,32 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
             return True
         return match.round.isdigit() and int(match.round) in sheet_args.rounds
 
+    def parse_match_odds(match: Match, info: MatchInfo) -> bool:
+        parsed_info = deepcopy(info)
+        try:
+            odds_parser.parse_odds(client, match, parsed_info)
+        except RuntimeError as exc:
+            print(
+                f"Предупреждение: коэффициенты матча {match.event_id or info.number} "
+                f"не загружены: {exc}"
+            )
+            return False
+        finally:
+            if delay > 0:
+                time.sleep(delay)
+
+        info.__dict__.update(parsed_info.__dict__)
+        return True
+
+    def parse_match_h2h(match: Match, info: MatchInfo) -> None:
+        try:
+            odds_parser.parse_h2h(client, match, info)
+        except RuntimeError as exc:
+            print(
+                f"Предупреждение: H2H матча {match.event_id or info.number} "
+                f"не загружен: {exc}"
+            )
+
     if sheet_args.mode in ("results", "full"):
         for round_matches in result_rounds:
             for match in round_matches:
@@ -854,11 +881,8 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 )
                 cnt += 1
 
-                odds_parser.parse_odds(client, match, info)
-                if delay > 0:
-                    time.sleep(delay)
-
-                odds_parser.parse_h2h(client, match, info)
+                parse_match_odds(match, info)
+                parse_match_h2h(match, info)
 
                 matches_info.append(info)
                 print(
@@ -883,13 +907,13 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 )
                 cnt += 1
 
-                odds_parser.parse_odds(client, match, info)
-                if not all(pair[0] > 0 and pair[1] > 0 for pair in (info.win1, info.draw, info.win2)):
+                odds_loaded = parse_match_odds(match, info)
+                if odds_loaded and not all(
+                    pair[0] > 0 and pair[1] > 0
+                    for pair in (info.win1, info.draw, info.win2)
+                ):
                     return matches_info
-                if delay > 0:
-                    time.sleep(delay)
-
-                odds_parser.parse_h2h(client, match, info)
+                parse_match_h2h(match, info)
 
                 matches_info.append(info)
                 print(
