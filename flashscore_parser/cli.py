@@ -77,9 +77,13 @@ def parse_timestamp(value: str | None) -> str:
     if not value:
         return ""
     try:
-        return datetime.fromtimestamp(int(value)).strftime("%Y-%m-%d %H:%M")
-    except ValueError:
+        timestamp = int(value)
+    except (TypeError, ValueError):
         return value
+    try:
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return ""
 
 def get_correct_numbering(rounds: list[list[Match]]):
     for i in range(len(rounds)):
