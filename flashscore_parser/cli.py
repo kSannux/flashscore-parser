@@ -339,7 +339,9 @@ class MatchInfo:
     ht_ft: dict[str, tuple[float, float]] = field(default_factory=dict)
     odd: tuple[float, float] = (0.0, 0.0)
     even: tuple[float, float] = (0.0, 0.0)
-    h2h: dict[str, list[H2HMatch]] = field(default_factory=dict)
+    h2h: dict[str, list[H2HMatch]] = field(
+        default_factory=lambda: {"home": [], "away": [], "h2h": []}
+    )
 
     def as_placeholder_row(self) -> dict[str, object]:
         values: dict[str, object] = {
@@ -379,9 +381,9 @@ class MatchInfo:
             "odd-final": self.odd[1],
             "even-prev": self.even[0],
             "even-final": self.even[1],
-            "home": self.h2h["home"],
-            "away": self.h2h["away"],
-            "h2h": self.h2h["h2h"],
+            "home": self.h2h.get("home", []),
+            "away": self.h2h.get("away", []),
+            "h2h": self.h2h.get("h2h", []),
         }
 
         def add_pair(name: str, pair: tuple[float, float]) -> None:
@@ -537,7 +539,11 @@ class OddsParser(ABC):
         h2h_url = build_feed_url(client.project_id, f"df_hh_1_{match.event_id}")
         payload = client.fetch_feed(h2h_url)
 
-        sections: dict[str, list[H2HMatch]] = {}
+        sections: dict[str, list[H2HMatch]] = {
+            "home": [],
+            "away": [],
+            "h2h": [],
+        }
         category_index = -1
         section_index = 0
 
