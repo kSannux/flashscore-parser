@@ -146,13 +146,22 @@ def fill_template_with_excel(
     workbook = None
     source_sheet = None
     try:
-        previous_calculation = app.calculation
-        previous_enable_events = app.api.EnableEvents
-        app.calculation = "manual"
-        app.api.EnableEvents = False
+        try:
+            enable_events = app.api.EnableEvents
+            app.api.EnableEvents = False
+            previous_enable_events = enable_events
+        except Exception as error:
+            print(f"Excel: не удалось отключить события: {error}", flush=True)
 
         workbook = app.books.open(str(output_path), update_links=False, read_only=False)
         worksheet = workbook.sheets[sheet_name]
+
+        try:
+            calculation = app.calculation
+            app.calculation = "manual"
+            previous_calculation = calculation
+        except Exception as error:
+            print(f"Excel: не удалось отключить пересчёт: {error}", flush=True)
 
         worksheet.api.Copy(After=worksheet.api)
         source_sheet = workbook.sheets.active
@@ -285,10 +294,12 @@ def fill_template_with_excel(
         if target_sheet_name is not None:
             worksheet.name = target_sheet_name
         print("Excel: сохранение файла...", flush=True)
-        app.api.EnableEvents = previous_enable_events
-        previous_enable_events = None
-        app.calculation = previous_calculation
-        previous_calculation = None
+        if previous_enable_events is not None:
+            app.api.EnableEvents = previous_enable_events
+            previous_enable_events = None
+        if previous_calculation is not None:
+            app.calculation = previous_calculation
+            previous_calculation = None
         workbook.save()
         print("Excel: файл сохранён.", flush=True)
     except Exception as error:
