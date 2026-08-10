@@ -449,6 +449,190 @@ class MatchInfo:
         return values
 
 
+ODDS_PAIR_FIELDS = (
+    "win1",
+    "draw",
+    "win2",
+    "both_yes",
+    "both_no",
+    "double_1x",
+    "double_12",
+    "double_x2",
+    "no_bet_1",
+    "no_bet_2",
+    "odd",
+    "even",
+)
+ODDS_MARKET_FIELDS = (
+    "over",
+    "under",
+    "asian_1",
+    "asian_2",
+    "european_1",
+    "european_x",
+    "european_2",
+    "correct",
+    "ht_ft",
+)
+H2H_SECTIONS = ("home", "away", "h2h")
+
+
+class MatchCache:
+    VERSION = 1
+
+    def __init__(self, directory: Path, source: str) -> None:
+        self.directory = directory
+        self.source = source
+
+    def _path(self, kind: str, event_id: str) -> Path:
+        safe_event_id = re.sub(r"[^A-Za-z0-9_-]", "_", event_id)
+        return self.directory / f"{kind}_{safe_event_id}.json"
+
+    def _read(self, kind: str, event_id: str) -> dict[str, Any] | None:
+        if not event_id:
+            return None
+
+        path = self._path(kind, event_id)
+        if not path.exists():
+            return None
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            print(f"Предупреждение: кеш {path} не прочитан: {exc}")
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        if (
+            payload.get("version") != self.VERSION
+            or payload.get("source") != self.source
+            or payload.get("eventId") != event_id
+        ):
+            return None
+        return payload
+
+    def _write(self, kind: str, event_id: str, payload: dict[str, Any]) -> None:
+        if not event_id:
+            return
+
+        path = self._path(kind, event_id)
+        temporary_path = path.with_suffix(".json.tmp")
+        document = {
+            "version": self.VERSION,
+            "source": self.source,
+            "eventId": event_id,
+            **payload,
+        }
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            temporary_path.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temporary_path.replace(path)
+        except OSError as exc:
+            print(f"Предупреждение: кеш {path} не сохранён: {exc}")
+
+    @staticmethod
+    def _pair(value: Any) -> tuple[float, float]:
+        if not isinstance(value, list) or len(value) != 2:
+            raise ValueError("ожидалась пара коэффициентов")
+        return float(value[0]), float(value[1])
+
+    def load_odds(self, event_id: str, info: MatchInfo) -> bool:
+        payload = self._read("odds", event_id)
+        if payload is None:
+            return False
+
+        odds = payload.get("odds")
+        if not isinstance(odds, dict):
+            return False
+
+        try:
+            pairs = {
+                name: self._pair(odds[name])
+                for name in ODDS_PAIR_FIELDS
+            }
+            markets = {
+                name: {
+                    str(line): self._pair(pair)
+                    for line, pair in odds[name].items()
+                }
+                for name in ODDS_MARKET_FIELDS
+                if isinstance(odds[name], dict)
+            }
+            if len(markets) != len(ODDS_MARKET_FIELDS):
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        for name, value in {**pairs, **markets}.items():
+            setattr(info, name, value)
+        return True
+
+    def save_odds(self, event_id: str, info: MatchInfo) -> None:
+        odds = {
+            name: getattr(info, name)
+            for name in (*ODDS_PAIR_FIELDS, *ODDS_MARKET_FIELDS)
+        }
+        self._write("odds", event_id, {"odds": odds})
+
+    def load_h2h(self, event_id: str, info: MatchInfo) -> bool:
+        payload = self._read("h2h", event_id)
+        if payload is None:
+            return False
+
+        h2h = payload.get("h2h")
+        if not isinstance(h2h, dict):
+            return False
+
+        sections: dict[str, list[H2HMatch]] = {}
+        try:
+            for section in H2H_SECTIONS:
+                items = h2h[section]
+                if not isinstance(items, list):
+                    return False
+                sections[section] = [
+                    H2HMatch(
+                        event_id=str(item["event_id"]),
+                        time=str(item["time"]),
+                        team1=str(item["team1"]),
+                        team2=str(item["team2"]),
+                        score1=int(item["score1"]),
+                        score2=int(item["score2"]),
+                        result=str(item["result"]),
+                    )
+                    for item in items
+                    if isinstance(item, dict)
+                ]
+                if len(sections[section]) != len(items):
+                    return False
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        info.h2h = sections
+        return True
+
+    def save_h2h(self, event_id: str, info: MatchInfo) -> None:
+        h2h = {
+            section: [
+                {
+                    "event_id": item.event_id,
+                    "time": item.time,
+                    "team1": item.team1,
+                    "team2": item.team2,
+                    "score1": item.score1,
+                    "score2": item.score2,
+                    "result": item.result,
+                }
+                for item in info.h2h.get(section, [])
+            ]
+            for section in H2H_SECTIONS
+        }
+        self._write("h2h", event_id, {"h2h": h2h})
+
+
 class FlashscoreClient:
     RETRY_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
     BASE_URLS = {"it": "https://www.flashscore.it/",
@@ -850,6 +1034,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     league = normalize_args(sheet_args.league)
     client = FlashscoreClient(lang=sheet_args.lang, timeout=timeout)
     odds_parser = create_odds_parser(sheet_args.lang)
+    match_cache = MatchCache(Path("cache"), sheet_args.lang)
 
     url = f"/{sport}/{country}/{league}"
     league_html = client.fetch(url)
@@ -878,7 +1063,14 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
             return True
         return match.round.isdigit() and int(match.round) in round_selection.numbers
 
-    def parse_match_odds(match: Match, info: MatchInfo) -> bool:
+    def parse_match_odds(
+        match: Match,
+        info: MatchInfo,
+        use_cache: bool,
+    ) -> bool:
+        if use_cache and match_cache.load_odds(match.event_id, info):
+            return True
+
         parsed_info = deepcopy(info)
         try:
             odds_parser.parse_odds(client, match, parsed_info)
@@ -893,9 +1085,14 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 time.sleep(delay)
 
         info.__dict__.update(parsed_info.__dict__)
+        if use_cache:
+            match_cache.save_odds(match.event_id, info)
         return True
 
     def parse_match_h2h(match: Match, info: MatchInfo) -> None:
+        if match_cache.load_h2h(match.event_id, info):
+            return
+
         try:
             odds_parser.parse_h2h(client, match, info)
         except RuntimeError as exc:
@@ -903,6 +1100,9 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 f"Предупреждение: H2H матча {match.event_id or info.number} "
                 f"не загружен: {exc}"
             )
+            return
+
+        match_cache.save_h2h(match.event_id, info)
 
     if round_selection.mode in ("results", "full"):
         for round_matches in result_rounds:
@@ -920,7 +1120,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 )
                 cnt += 1
 
-                parse_match_odds(match, info)
+                parse_match_odds(match, info, use_cache=True)
                 parse_match_h2h(match, info)
 
                 matches_info.append(info)
@@ -946,7 +1146,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 )
                 cnt += 1
 
-                odds_loaded = parse_match_odds(match, info)
+                odds_loaded = parse_match_odds(match, info, use_cache=False)
                 if odds_loaded and not all(
                     pair[0] > 0 and pair[1] > 0
                     for pair in (info.win1, info.draw, info.win2)
