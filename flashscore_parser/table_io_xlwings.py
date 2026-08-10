@@ -49,6 +49,14 @@ def write_excel_text(cell: Any, text: str) -> None:
     cell.api.Value = text
 
 
+def write_excel_text_range(cell_range: Any, values: list[str]) -> None:
+    cell_range.api.NumberFormat = "@"
+    if len(values) == 1:
+        cell_range.api.Value = values[0]
+    else:
+        cell_range.api.Value = (tuple(values),)
+
+
 def excel_rgb(color: Any) -> int | None:
     if color is None or color.type != "rgb" or not color.rgb:
         return None
@@ -133,9 +141,16 @@ def fill_template_with_excel(
 
     app.display_alerts = False
     app.screen_updating = False
+    previous_calculation = None
+    previous_enable_events = None
     workbook = None
     source_sheet = None
     try:
+        previous_calculation = app.calculation
+        previous_enable_events = app.api.EnableEvents
+        app.calculation = "manual"
+        app.api.EnableEvents = False
+
         workbook = app.books.open(str(output_path), update_links=False, read_only=False)
         worksheet = workbook.sheets[sheet_name]
 
@@ -164,6 +179,15 @@ def fill_template_with_excel(
                 row_offset_from_source = target_row - source_row
                 array_cells.update(value.cells(row_offset_from_source))
 
+        source_formula_passthrough: dict[tuple[int, int], bool] = {}
+        max_columns = max((len(row) for row in rendered_rows), default=0)
+        for source_row in set(source_row_numbers):
+            for column in range(1, max_columns + 1):
+                source_cell = source_sheet.cells(source_row, column)
+                source_formula_passthrough[(source_row, column)] = (
+                    copied_formula_needs_no_rendering(source_cell)
+                )
+
         print(f"Excel: заполнение {total_rows} строк...", flush=True)
         for row_offset, rendered_row in enumerate(rendered_rows):
             target_row = start_row + row_offset
@@ -172,45 +196,86 @@ def fill_template_with_excel(
             target_range = worksheet.range((target_row, 1), (target_row, len(rendered_row)))
             source_range.api.Copy(Destination=target_range.api)
 
+            plain_runs: list[tuple[int, list[str]]] = []
+            plain_start = 0
+            plain_values: list[str] = []
+            individual_values: list[tuple[int, Any, bool]] = []
+            fills: list[tuple[int, Any]] = []
+
+            def finish_plain_run() -> None:
+                nonlocal plain_start, plain_values
+                if plain_values:
+                    plain_runs.append((plain_start, plain_values))
+                    plain_start = 0
+                    plain_values = []
+
             for column, (value, conditional_fill) in enumerate(rendered_row, start=1):
-                target_cell = worksheet.cells(target_row, column)
                 if (target_row, column) in array_cells:
+                    finish_plain_run()
                     continue
 
-                source_cell = source_sheet.cells(source_row, column)
+                if conditional_fill is not None:
+                    fills.append((column, conditional_fill))
+
+                if source_formula_passthrough[(source_row, column)]:
+                    finish_plain_run()
+                    continue
+
+                is_rich_text = hasattr(value, "_opt")
+                rendered_value = "" if value is None else str(value)
+                if rendered_value.startswith("="):
+                    finish_plain_run()
+                    rendered_value = shift_rendered_formula(
+                        rendered_value,
+                        source_row,
+                        column,
+                        target_row,
+                        column,
+                    )
+                    individual_values.append((column, rendered_value, False))
+                elif is_rich_text:
+                    finish_plain_run()
+                    individual_values.append((column, value, True))
+                else:
+                    if not plain_values:
+                        plain_start = column
+                    plain_values.append(rendered_value)
+
+            finish_plain_run()
+
+            for first_column, values in plain_runs:
+                last_column = first_column + len(values) - 1
+                text_range = worksheet.range(
+                    (target_row, first_column),
+                    (target_row, last_column),
+                )
                 try:
-                    if not copied_formula_needs_no_rendering(source_cell):
-                        if hasattr(value, "_opt"):
-                            rendered_value = str(value)
-                            if rendered_value.startswith("="):
-                                rendered_value = shift_rendered_formula(
-                                    rendered_value,
-                                    source_row,
-                                    column,
-                                    target_row,
-                                    column,
-                                )
-                                write_excel_text(target_cell, rendered_value)
-                            else:
-                                write_excel_rich_text(target_cell, value)
-                        else:
-                            rendered_value = "" if value is None else str(value)
-                            if rendered_value.startswith("="):
-                                rendered_value = shift_rendered_formula(
-                                    rendered_value,
-                                    source_row,
-                                    column,
-                                    target_row,
-                                    column,
-                                )
-                            write_excel_text(target_cell, rendered_value)
+                    write_excel_text_range(text_range, values)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"Лист {worksheet.name}, диапазон {text_range.address}: {error}"
+                    ) from error
+
+            for column, value, is_rich_text in individual_values:
+                target_cell = worksheet.cells(target_row, column)
+                try:
+                    if is_rich_text:
+                        write_excel_rich_text(target_cell, value)
+                    else:
+                        write_excel_text(target_cell, value)
                 except Exception as error:
                     raise RuntimeError(
                         f"Лист {worksheet.name}, ячейка {target_cell.address}: {error}"
                     ) from error
 
-                if conditional_fill is not None:
+            for column, conditional_fill in fills:
+                target_cell = worksheet.cells(target_row, column)
+                try:
                     apply_excel_fill(target_cell, conditional_fill)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"Лист {worksheet.name}, ячейка {target_cell.address}: {error}"
+                    ) from error
 
             if (row_offset + 1) % 100 == 0 or row_offset + 1 == total_rows:
                 print(f"Excel: заполнено {row_offset + 1}/{total_rows} строк.", flush=True)
@@ -220,6 +285,10 @@ def fill_template_with_excel(
         if target_sheet_name is not None:
             worksheet.name = target_sheet_name
         print("Excel: сохранение файла...", flush=True)
+        app.api.EnableEvents = previous_enable_events
+        previous_enable_events = None
+        app.calculation = previous_calculation
+        previous_calculation = None
         workbook.save()
         print("Excel: файл сохранён.", flush=True)
     except Exception as error:
@@ -234,4 +303,10 @@ def fill_template_with_excel(
                 if workbook is not None:
                     workbook.close()
             finally:
+                if previous_enable_events is not None:
+                    with suppress(Exception):
+                        app.api.EnableEvents = previous_enable_events
+                if previous_calculation is not None:
+                    with suppress(Exception):
+                        app.calculation = previous_calculation
                 app.quit()
