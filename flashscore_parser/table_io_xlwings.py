@@ -121,6 +121,74 @@ def apply_excel_fill(cell: Any, fill: Any) -> None:
     cell.api.Interior.Color = color
 
 
+def rename_sheets_with_excel(
+    output_path: Path,
+    sheet_names: dict[str, str],
+) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("Переименование листов .xlsm выполняется только в Windows через Microsoft Excel.")
+    if xw is None:
+        raise RuntimeError("Для .xlsm установите xlwings: py -m pip install -r requirements.txt")
+
+    changes = {
+        source_name: target_name
+        for source_name, target_name in sheet_names.items()
+        if source_name != target_name
+    }
+    if not changes:
+        return
+
+    try:
+        app = xw.App(visible=False, add_book=False)
+    except Exception as error:
+        raise RuntimeError(f"Не удалось запустить Microsoft Excel: {error}") from error
+
+    app.display_alerts = False
+    app.screen_updating = False
+    workbook = None
+    try:
+        workbook = app.books.open(str(output_path), update_links=False, read_only=False)
+        existing_names = {sheet.name for sheet in workbook.sheets}
+        missing_names = set(changes) - existing_names
+        if missing_names:
+            raise RuntimeError(
+                f"В книге не найдены листы: {', '.join(sorted(missing_names))}"
+            )
+
+        occupied_names = existing_names - set(changes)
+        conflicts = set(changes.values()) & occupied_names
+        if conflicts:
+            raise RuntimeError(
+                f"Имена уже заняты другими листами: {', '.join(sorted(conflicts))}"
+            )
+
+        temporary_names: dict[str, str] = {}
+        reserved_names = existing_names | set(changes.values())
+        temporary_index = 1
+        for source_name in changes:
+            temporary_name = f"__fsp_tmp_{temporary_index}__"
+            while temporary_name in reserved_names:
+                temporary_index += 1
+                temporary_name = f"__fsp_tmp_{temporary_index}__"
+            temporary_index += 1
+            reserved_names.add(temporary_name)
+            workbook.sheets[source_name].name = temporary_name
+            temporary_names[temporary_name] = changes[source_name]
+
+        for temporary_name, target_name in temporary_names.items():
+            workbook.sheets[temporary_name].name = target_name
+
+        workbook.save()
+    except Exception as error:
+        raise RuntimeError(f"Не удалось переименовать листы через Microsoft Excel: {error}") from error
+    finally:
+        try:
+            if workbook is not None:
+                workbook.close()
+        finally:
+            app.quit()
+
+
 def fill_template_with_excel(
     output_path: Path,
     sheet_name: str,

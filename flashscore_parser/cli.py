@@ -18,7 +18,11 @@ from urllib.parse import urlencode, urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from flashscore_parser.table_io import fill_xlsx_template, read_xlsx_sheet_templates
+from flashscore_parser.table_io import (
+    fill_xlsx_template,
+    read_xlsx_sheet_templates,
+    rename_workbook_sheets,
+)
 
 FEED_BASE_URL_TEMPLATE = "https://{project_id}.flashscore.ninja/{project_id}/x/feed"
 ODDS_API_URL = "https://global.ds.lsapp.eu/odds/pq_graphql"
@@ -1179,13 +1183,6 @@ def main(argv: list[str] | None = None) -> int:
         target_names = [sheet_args.sheet for _, sheet_args in sheet_jobs]
         if len(target_names) != len(set(target_names)):
             raise RuntimeError("Значения --sheet должны быть уникальными для всех листов.")
-        source_names = {template.sheet_name for template, _ in sheet_jobs}
-        for template, sheet_args in sheet_jobs:
-            if sheet_args.sheet in source_names and sheet_args.sheet != template.sheet_name:
-                raise RuntimeError(
-                    f"Лист '{template.sheet_name}' нельзя переименовать в '{sheet_args.sheet}': "
-                    "это имя другого исходного листа."
-                )
 
         for index, (template, sheet_args) in enumerate(sheet_jobs):
             print(f"Лист {template.sheet_name}: сбор данных для {sheet_args.sport}/{sheet_args.country}/{sheet_args.league}.")
@@ -1197,9 +1194,17 @@ def main(argv: list[str] | None = None) -> int:
                 args.template,
                 output,
                 copy_template=index == 0,
-                target_sheet_name=sheet_args.sheet,
             )
-            print(f"Лист {sheet_args.sheet}: сохранено {len(matches_info)} записей.", flush=True)
+            print(f"Лист {template.sheet_name}: сохранено {len(matches_info)} записей.", flush=True)
+
+        print("Переименование листов...", flush=True)
+        rename_workbook_sheets(
+            output,
+            {
+                template.sheet_name: sheet_args.sheet
+                for template, sheet_args in sheet_jobs
+            },
+        )
     except RuntimeError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1

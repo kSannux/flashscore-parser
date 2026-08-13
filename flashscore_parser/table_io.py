@@ -16,7 +16,10 @@ from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.utils.cell import range_boundaries
 
-from flashscore_parser.table_io_xlwings import fill_template_with_excel
+from flashscore_parser.table_io_xlwings import (
+    fill_template_with_excel,
+    rename_sheets_with_excel,
+)
 
 PLACEHOLDER_RE = re.compile(r"\{((?:[^{}]|\{[^{}]*\})+)\}")
 CELL_REF = r"\$?[A-Z]{1,3}\$?\d+"
@@ -425,6 +428,120 @@ def template_rows(worksheet: Worksheet, start_row: int) -> list[tuple[Cell, ...]
 def clear_template_area(worksheet: Worksheet, start_row: int) -> None:
     if worksheet.max_row >= start_row:
         worksheet.delete_rows(start_row, worksheet.max_row - start_row + 1)
+
+
+def replace_sheet_references(formula: str, sheet_names: dict[str, str]) -> str:
+    def quoted_reference(sheet_name: str) -> str:
+        return "'" + sheet_name.replace("'", "''") + "'!"
+
+    token_targets: dict[str, str] = {}
+    patterns: list[str] = []
+
+    for source_name, target_name in sheet_names.items():
+        quoted_source = quoted_reference(source_name)
+        token_targets[quoted_source.casefold()] = target_name
+        patterns.append(re.escape(quoted_source))
+
+        if re.fullmatch(r"[A-Za-z_\\][A-Za-z0-9_.]*", source_name):
+            plain_source = f"{source_name}!"
+            token_targets[plain_source.casefold()] = target_name
+            patterns.append(
+                rf"(?<![A-Za-z0-9_.\]]){re.escape(plain_source)}"
+            )
+
+    if not patterns:
+        return formula
+
+    reference_re = re.compile(
+        "|".join(sorted(patterns, key=len, reverse=True)),
+        re.IGNORECASE,
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        target_name = token_targets[match.group(0).casefold()]
+        return quoted_reference(target_name)
+
+    return reference_re.sub(replace, formula)
+
+
+def rename_workbook_sheets(
+    output_path: str | Path,
+    sheet_names: dict[str, str],
+) -> None:
+    output_path = ensure_workbook_path(output_path)
+    if len(sheet_names.values()) != len(set(sheet_names.values())):
+        raise RuntimeError("Итоговые имена листов должны быть уникальными.")
+
+    if output_path.suffix.lower() == ".xlsm":
+        rename_sheets_with_excel(output_path, sheet_names)
+        return
+
+    workbook = load_workbook(output_path, rich_text=True)
+    try:
+        existing_names = set(workbook.sheetnames)
+        missing_names = set(sheet_names) - existing_names
+        if missing_names:
+            raise RuntimeError(
+                f"В книге не найдены листы: {', '.join(sorted(missing_names))}"
+            )
+
+        occupied_names = existing_names - set(sheet_names)
+        conflicts = set(sheet_names.values()) & occupied_names
+        if conflicts:
+            raise RuntimeError(
+                f"Имена уже заняты другими листами: {', '.join(sorted(conflicts))}"
+            )
+
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and value.startswith("="):
+                        cell.value = replace_sheet_references(value, sheet_names)
+                    elif isinstance(value, ArrayFormula):
+                        value.text = replace_sheet_references(value.text, sheet_names)
+
+            for validation in worksheet.data_validations.dataValidation:
+                for attribute in ("formula1", "formula2"):
+                    formula = getattr(validation, attribute)
+                    if isinstance(formula, str):
+                        setattr(
+                            validation,
+                            attribute,
+                            replace_sheet_references(formula, sheet_names),
+                        )
+
+        for defined_name in workbook.defined_names.values():
+            if isinstance(defined_name.attr_text, str):
+                defined_name.attr_text = replace_sheet_references(
+                    defined_name.attr_text,
+                    sheet_names,
+                )
+
+        changes = {
+            source_name: target_name
+            for source_name, target_name in sheet_names.items()
+            if source_name != target_name
+        }
+        temporary_names: dict[str, str] = {}
+        reserved_names = existing_names | set(changes.values())
+        temporary_index = 1
+        for source_name, target_name in changes.items():
+            temporary_name = f"__fsp_tmp_{temporary_index}__"
+            while temporary_name in reserved_names:
+                temporary_index += 1
+                temporary_name = f"__fsp_tmp_{temporary_index}__"
+            temporary_index += 1
+            reserved_names.add(temporary_name)
+            workbook[source_name].title = temporary_name
+            temporary_names[temporary_name] = target_name
+
+        for temporary_name, target_name in temporary_names.items():
+            workbook[temporary_name].title = target_name
+
+        workbook.save(output_path)
+    finally:
+        close_workbook(workbook)
 
 
 def read_xlsx_template(
