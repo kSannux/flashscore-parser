@@ -22,6 +22,7 @@ from flashscore_parser.table_io_xlwings import (
 )
 
 PLACEHOLDER_RE = re.compile(r"\{((?:[^{}]|\{[^{}]*\})+)\}")
+REPEAT_PLACEHOLDER_RE = re.compile(r"\{repeat:([^{}]+)\}")
 CELL_REF = r"\$?[A-Z]{1,3}\$?\d+"
 FORMAT_ATTR_RE = re.compile(
     rf"^\s*.+?\s*\?\s*{CELL_REF}\s*:\s*"
@@ -264,12 +265,8 @@ def resolve_placeholder(values: dict[str, Any], placeholder: str) -> Any:
 
     name, attrs = key.split(":", 1)
     if is_special_name(name):
-        odd = resolve_placeholder(values, attrs)
-        if odd == "":
-            return ""
-        repeat_values = values["repeat"].setdefault(key, {})
-        repeat_values[odd] = repeat_values.get(odd, 0) + 1
-        return repeat_values[odd]
+        repeat_values = values.get("repeat", {})
+        return repeat_values.get(attrs, "")
 
     if is_valid_missing_odds_placeholder(name, attrs):
         return MISSING_PLACEHOLDER_VALUE
@@ -396,16 +393,23 @@ def render_rich_rows(
     worksheet: Worksheet,
 ) -> list[list[tuple[str | CellRichText | RenderedArrayFormula, Any | None]]]:
     rendered: list[list[tuple[str | CellRichText | RenderedArrayFormula, Any | None]]] = []
-    repeats = [{} for _ in range(max(len(row) for row in source_rows))]
 
     for values in data_rows:
         for source_row in source_rows:
             row: list[tuple[str | CellRichText | RenderedArrayFormula, Any | None]] = []
-            for column, cell in enumerate(source_row):
-                values["repeat"] = repeats[column]
+            for cell in source_row:
                 row.append(render_rich_cell(cell, values, worksheet))
             rendered.append(row)
     return rendered
+
+
+def repeat_placeholder_keys(template: XlsxTemplate) -> set[str]:
+    return {
+        match.group(1).strip()
+        for row in template.row_templates
+        for value in row
+        for match in REPEAT_PLACEHOLDER_RE.finditer(cell_text(value))
+    }
 
 
 def copy_cell_style(source: Cell, target: Cell) -> None:

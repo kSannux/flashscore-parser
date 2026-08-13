@@ -22,6 +22,8 @@ from flashscore_parser.table_io import (
     fill_xlsx_template,
     read_xlsx_sheet_templates,
     rename_workbook_sheets,
+    repeat_placeholder_keys,
+    resolve_placeholder,
 )
 
 FEED_BASE_URL_TEMPLATE = "https://{project_id}.flashscore.ninja/{project_id}/x/feed"
@@ -380,6 +382,7 @@ class MatchInfo:
     h2h: dict[str, list[H2HMatch]] = field(
         default_factory=lambda: {"home": [], "away": [], "h2h": []}
     )
+    repeat: dict[str, int] = field(default_factory=dict)
 
     def as_placeholder_row(self) -> dict[str, object]:
         values: dict[str, object] = {
@@ -422,6 +425,7 @@ class MatchInfo:
             "home": self.h2h.get("home", []),
             "away": self.h2h.get("away", []),
             "h2h": self.h2h.get("h2h", []),
+            "repeat": self.repeat,
         }
 
         def add_pair(name: str, pair: tuple[float, float]) -> None:
@@ -1032,7 +1036,12 @@ def parse_sheet_args(text: str, source_sheet_name: str) -> argparse.Namespace:
         raise RuntimeError(f"Некорректные аргументы в листе '{source_sheet_name}': {text}") from error
 
 
-def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float) -> list[MatchInfo]:
+def collect_matches(
+    sheet_args: argparse.Namespace,
+    delay: float,
+    timeout: float,
+    repeat_keys: set[str] | None = None,
+) -> list[MatchInfo]:
     sport = normalize_args(sheet_args.sport)
     country = normalize_args(sheet_args.country)
     league = normalize_args(sheet_args.league)
@@ -1044,6 +1053,7 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     league_html = client.fetch(url)
 
     round_selection: RoundSelection = sheet_args.rounds
+    repeat_keys = repeat_keys or set()
     result_rounds: list[list[Match]] = []
     fixture_rounds: list[list[Match]] = []
 
@@ -1055,11 +1065,19 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                 f"На странице результатов не найдено матчей: {url}/results. "
                 "Проверьте предыдущие сезоны в archive и укажите в --league"
             )
+    elif repeat_keys:
+        try:
+            result_rounds = parse_results_rounds(client, league_html)
+        except RuntimeError as exc:
+            print(f"Предупреждение: история results для repeat не загружена: {exc}")
 
     if round_selection.mode in ("fixtures", "full"):
         fixture_rounds = parse_fixtures_rounds(league_html)
 
     matches_info: list[MatchInfo] = []
+    repeat_counts: dict[str, dict[Any, int]] = {
+        key: {} for key in repeat_keys
+    }
     cnt = 1
 
     def selected_round(match: Match) -> bool:
@@ -1108,13 +1126,27 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
 
         match_cache.save_h2h(match.event_id, info)
 
+    def calculate_repeats(info: MatchInfo) -> None:
+        values = info.as_placeholder_row()
+        for key, counts in repeat_counts.items():
+            value = resolve_placeholder(values, key)
+            if value == "":
+                continue
+            try:
+                counts[value] = counts.get(value, 0) + 1
+            except TypeError:
+                continue
+            info.repeat[key] = counts[value]
+
     if round_selection.mode in ("results", "full"):
         for round_matches in result_rounds:
             for match in round_matches:
-                if not selected_round(match):
-                    continue
+                selected = (
+                    round_selection.mode in ("results", "full")
+                    and selected_round(match)
+                )
                 info = MatchInfo(
-                    number=cnt,
+                    number=cnt if selected else 0,
                     round=match.round,
                     time=match.time,
                     team1=match.team1,
@@ -1122,12 +1154,15 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                     score1=int(match.score1),
                     score2=int(match.score2),
                 )
-                cnt += 1
 
                 parse_match_odds(match, info, use_cache=True)
-                parse_match_h2h(match, info)
+                calculate_repeats(info)
 
+                if not selected:
+                    continue
+                parse_match_h2h(match, info)
                 matches_info.append(info)
+                cnt += 1
                 print(
                     f"Обработан матч {info.number}: "
                     f"тур {info.round}, {info.time}, "
@@ -1137,10 +1172,12 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
     if round_selection.mode in ("fixtures", "full"):
         for round_matches in fixture_rounds:
             for match in round_matches:
-                if not selected_round(match):
+                selected = selected_round(match)
+                if not selected and not repeat_keys:
                     continue
+
                 info = MatchInfo(
-                    number=cnt,
+                    number=cnt if selected else 0,
                     round=match.round,
                     time=match.time,
                     team1=match.team1,
@@ -1148,7 +1185,6 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                     score1=match.score1,
                     score2=match.score2,
                 )
-                cnt += 1
 
                 odds_loaded = parse_match_odds(match, info, use_cache=False)
                 if odds_loaded and not all(
@@ -1156,9 +1192,14 @@ def collect_matches(sheet_args: argparse.Namespace, delay: float, timeout: float
                     for pair in (info.win1, info.draw, info.win2)
                 ):
                     return matches_info
-                parse_match_h2h(match, info)
+                calculate_repeats(info)
 
+                if not selected:
+                    continue
+                parse_match_h2h(match, info)
                 matches_info.append(info)
+                cnt += 1
+
                 print(
                     f"Обработан матч {info.number}: "
                     f"тур {info.round}, {info.time}, "
@@ -1186,7 +1227,12 @@ def main(argv: list[str] | None = None) -> int:
 
         for index, (template, sheet_args) in enumerate(sheet_jobs):
             print(f"Лист {template.sheet_name}: сбор данных для {sheet_args.sport}/{sheet_args.country}/{sheet_args.league}.")
-            matches_info = collect_matches(sheet_args, args.delay, args.timeout)
+            matches_info = collect_matches(
+                sheet_args,
+                args.delay,
+                args.timeout,
+                repeat_placeholder_keys(template),
+            )
             print(f"Лист {template.sheet_name}: данные собраны. Заполнение файла...", flush=True)
             fill_xlsx_template(
                 [info.as_placeholder_row() for info in matches_info],
