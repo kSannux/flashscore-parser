@@ -1138,36 +1138,38 @@ def collect_matches(
                 continue
             info.repeat[key] = counts[value]
 
-    if round_selection.mode in ("results", "full"):
-        for round_matches in result_rounds:
-            for match in round_matches:
-                selected = (
-                    round_selection.mode in ("results", "full")
-                    and selected_round(match)
-                )
-                info = MatchInfo(
-                    number=cnt if selected else 0,
-                    round=match.round,
-                    time=match.time,
-                    team1=match.team1,
-                    team2=match.team2,
-                    score1=int(match.score1),
-                    score2=int(match.score2),
-                )
+    for round_matches in result_rounds:
+        for match in round_matches:
+            selected = (
+                round_selection.mode in ("results", "full")
+                and selected_round(match)
+            )
+            if not selected and not repeat_keys:
+                continue
 
-                parse_match_odds(match, info, use_cache=True)
-                calculate_repeats(info)
+            info = MatchInfo(
+                number=cnt if selected else 0,
+                round=match.round,
+                time=match.time,
+                team1=match.team1,
+                team2=match.team2,
+                score1=int(match.score1),
+                score2=int(match.score2),
+            )
 
-                if not selected:
-                    continue
-                parse_match_h2h(match, info)
-                matches_info.append(info)
-                cnt += 1
-                print(
-                    f"Обработан матч {info.number}: "
-                    f"тур {info.round}, {info.time}, "
-                    f"{info.team1} {info.score1}:{info.score2} {info.team2}"
-                )
+            parse_match_odds(match, info, use_cache=True)
+            calculate_repeats(info)
+
+            if not selected:
+                continue
+            parse_match_h2h(match, info)
+            matches_info.append(info)
+            cnt += 1
+            print(
+                f"Обработан матч {info.number}: "
+                f"тур {info.round}, {info.time}, "
+                f"{info.team1} {info.score1}:{info.score2} {info.team2}"
+            )
 
     if round_selection.mode in ("fixtures", "full"):
         for round_matches in fixture_rounds:

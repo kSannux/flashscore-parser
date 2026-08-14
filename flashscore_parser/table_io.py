@@ -22,7 +22,6 @@ from flashscore_parser.table_io_xlwings import (
 )
 
 PLACEHOLDER_RE = re.compile(r"\{((?:[^{}]|\{[^{}]*\})+)\}")
-REPEAT_PLACEHOLDER_RE = re.compile(r"\{repeat:([^{}]+)\}")
 CELL_REF = r"\$?[A-Z]{1,3}\$?\d+"
 FORMAT_ATTR_RE = re.compile(
     rf"^\s*.+?\s*\?\s*{CELL_REF}\s*:\s*"
@@ -404,12 +403,15 @@ def render_rich_rows(
 
 
 def repeat_placeholder_keys(template: XlsxTemplate) -> set[str]:
-    return {
-        match.group(1).strip()
-        for row in template.row_templates
-        for value in row
-        for match in REPEAT_PLACEHOLDER_RE.finditer(cell_text(value))
-    }
+    keys: set[str] = set()
+    for row in template.row_templates:
+        for value in row:
+            for match in PLACEHOLDER_RE.finditer(cell_text(value)):
+                placeholder, _ = split_format_attr(match.group(1))
+                name, separator, attrs = placeholder.partition(":")
+                if separator and name.strip() == "repeat":
+                    keys.add(attrs.strip())
+    return keys
 
 
 def copy_cell_style(source: Cell, target: Cell) -> None:
